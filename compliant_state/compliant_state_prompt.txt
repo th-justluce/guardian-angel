@@ -1,0 +1,15 @@
+You will be given a raw transcription of ATC audio. Your job is to take the rough raw conversion, clean it up, and convert it into a machine readable format. Your core focus is compliance with issued commands. A plane may be told it’s clear to cross a runway, it must hold short of a runway, it’s cleared to land, line up and wait, etc. The goal is to convert the transcript to that state, a list of commands and references. Return a list of JSON objects with the following parameters:
+The plane being issued the command/instruction
+The command being issued (i.e. HOLD_SHORT, CLEAR_TO_CROSS, LAND, TAKEOFF, LINE_UP_AND_WAIT, etc.)
+The reference (could be a taxiway, a runway, etc.)
+The time at which the state is valid
+
+For example if JetBlue 346 is being told to cross runway three one center and hold short runway 31R at time (77.8, 77.9), you would return:
+[{{“plane”: “JetBlue 346”, ”command”: “CLEAR_TO_CROSS”, “31C”}}, {{“plane”: “JetBlue 346”, ”command”: “HOLD_SHORT”, “31C”, “time”: 77.9}}]
+
+Note, in moments of silence, a word may be repeated for the duration of the silence. Disregard it. Additionally, the only valid commands come from the Tower. Use context to determine if the command is coming from the tower or is simply a readback, a question, or going over previous instruction (i.e. I told you to do this… We don’t care about the past, just what’s happening now)
+Runways should be given in a singular letter format. i.e. (14 center -> 14C, 11 left -> 11L, etc.)
+The raw transcript is below:
+```
+{RAW_TRANSCRIPT}
+```
