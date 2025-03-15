@@ -67,6 +67,8 @@ def generate_map(edges: gpd.GeoDataFrame):
         center_lon = taxiways.geometry.centroid.x.mean()
     else:
         # Fallback: approximate center of KBOS
+        print("WE FELL BACK TO HARDCODED VALUES, CHECK THE CODE...")
+        # NOT GREAT
         center_lat, center_lon = 42.364, -71.005
     
     features = [runways, taxiways]
@@ -238,7 +240,7 @@ def main(args=sys.argv):
     # Position in 3D space (x, y, z), Bearing (degrees), Speed (m/s), Vertical Rate (m/s)
     # Going to have that for some number of aircraft, above will apply for obstacle avoidance.
     # TCAS allows planes to communicate with each other. We don't have that communication
-    # Therefore, we operate on the discretion of the other plane
+    # Therefore, we need some other system to determine who should descend, who should climb
     current_lat, current_lon = 41.7941664, -87.7642633      # Current position at KMDW
     bearing = 90                                            # Heading (in degrees)
     speed = 50                                              # Speed in m/s
