@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# GeoJSON Auto-generated:
+cache/
+*-pathpreds.html
+
 # C extensions
 *.so
 
