@@ -1,16 +1,17 @@
 import folium
 from folium.plugins import MousePosition
-
+from folium.elements import Element
 from typing import List, Dict
 import geopandas as gpd
 import pandas as pd
+import json
 
-# Global plane color mapping and palette
+# Global plane color mapping and palette with better contrasting colors
 PLANE_COLORS = {}
 COLOR_PALETTE = [
-    "purple", "green", "blue", "orange", "brown",
-    "pink", "gray", "black", "red", "cadetblue",
-    "darkgreen", "darkpurple"
+    "#1f77b4", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+    "#aec7e8", "#ffbb78", "#98df8a", "#ff9896"
 ]
 
 def get_plane_color(tail: str) -> str:
@@ -20,70 +21,64 @@ def get_plane_color(tail: str) -> str:
         PLANE_COLORS[tail] = COLOR_PALETTE[index]
     return PLANE_COLORS[tail]
 
-import folium
-from folium.plugins import MousePosition
-from folium.elements import Element
-# ----------------------------------------------------------------
-# 1) Construct a custom <script> block to animate the data
-# ----------------------------------------------------------------
-# We'll store flight lines in Leaflet layers and reveal them step by step.
-# For each step:
-#   1) We pick the next point for each flight if the timestamp <= current time
-#   2) If there's a violation at the current time, show a big alert overlay
-#   3) We increment current time and repeat
-# This is a minimal example – you can refine how you do the stepping logic.
-
-def build_custom_js(m: folium.Map, flights, violations):
-    map_name = m.get_name()
-    custom_js = """
-    :param m: The Folium map object
-    :param flights_data: A Python list of flight objects, each like:
-        [
-          {
-            "tail": "SWA2504",
-            "points": [
-               {"lat": 41.786, "lon": -87.754, "timestamp": 1740494856.48, ...},
-               ...
-            ]
-          },
-          {
-            "tail": "LXJ560",
-            "points": [...],
-          }
-        ]
-      (Make sure each sub-list is sorted, or we can sort in JS)
-    :param violations_data: A dictionary keyed by timestamp (float or int),
-       e.g. {
-         1740494856.48: {"message": "some incursion", "advisory": "STOP NOW"},
-         ...
-       }
-      or you can store them as floats or strings. Just be consistent in the JS.
+def build_custom_js(m: folium.Map, flights, violations, animation_interval=20):
     """
-
-    # We'll embed a single custom script that:
-    # 1) Finds the global minT & maxT across all flights
-    # 2) Steps from minT to maxT
-    # 3) For each flight, if currentTime >= that flight's earliest, we place/update the marker
-    # 4) We also place a small circle marker each step, like a "pen" leaving dots on the map
-    # 5) Check if there's a violation at the current time (global) and show/hide an alert
-
+    Build custom JavaScript for map animation with performance optimizations:
+    - Use requestAnimationFrame instead of setTimeout
+    - Batch DOM operations
+    - Reduce marker creation by using a single marker for each flight
+    - Optimize polyline updates
+    - Add time controls for playback
+    """
     map_name = m.get_name()
     custom_js = f"""
     <script>
     document.addEventListener('DOMContentLoaded', function() {{
         var mapObject = window["{map_name}"];
+        
+        // Add control panel for animation
+        var controlPanel = L.control({{position: 'bottomleft'}});
+        controlPanel.onAdd = function(map) {{
+            var div = L.DomUtil.create('div', 'control-panel');
+            div.style.padding = '10px';
+            div.style.background = 'white';
+            div.style.borderRadius = '5px';
+            div.style.boxShadow = '0 1px 5px rgba(0,0,0,0.4)';
+            
+            div.innerHTML = `
+                <div style="display: flex; align-items: center; margin-bottom: 5px;">
+                    <button id="play-pause" style="margin-right: 10px; padding: 5px 10px;">▶️</button>
+                    <input type="range" id="speed-slider" min="1" max="100" value="4" style="width: 100px;">
+                    <span id="speed-value" style="margin-left: 5px;">4x</span>
+                </div>
+                <div style="display: flex; align-items: center;">
+                    <input type="range" id="time-slider" min="0" max="100" value="0" style="flex-grow: 1; margin-right: 5px;">
+                    <span id="current-time-display">00:00</span>
+                </div>
+            `;
+            
+            return div;
+        }};
+        controlPanel.addTo(mapObject);
 
         var flights = {flights};
         var violations = {violations};
-
-        // 1) Sort each flight's points by ascending timestamp (in case not sorted)
+        
+        // Pre-process data for better performance
         flights.forEach(function(flight) {{
             flight.points.sort(function(a, b) {{
                 return a.timestamp - b.timestamp;
             }});
+            // Pre-calculate path for efficient access
+            flight.path = flight.points.map(p => [p.lat, p.lon]);
+            // Index points by timestamp for quick lookup
+            flight.pointsByTime = {{}};
+            flight.points.forEach(p => {{
+                flight.pointsByTime[p.timestamp] = p;
+            }});
         }});
 
-        // 2) Find global minT & maxT across all flights
+        // Find global min/max time across all flights
         var globalMinT = Infinity;
         var globalMaxT = -Infinity;
         flights.forEach(function(flight) {{
@@ -94,37 +89,74 @@ def build_custom_js(m: folium.Map, flights, violations):
                 if (lastT > globalMaxT) globalMaxT = lastT;
             }}
         }});
-
-        // If no data at all, do nothing
+        
         if (globalMinT === Infinity || globalMaxT === -Infinity) {{
             console.warn("No valid flight data to animate.");
             return;
         }}
-
-        // 3) For each flight, create a polyline & marker object
-        // We'll store them in a dictionary keyed by flight tail
+        
+        // Set time slider range
+        var timeSlider = document.getElementById('time-slider');
+        timeSlider.min = 0;
+        timeSlider.max = 100;
+        timeSlider.value = 0;
+        
+        // Initialize markers, use icon for better performance
         var flightMarkers = {{}};
-        var flightPolylines = {{}};
-        var flightMinTime = {{}};
+        var flightPaths = {{}};
+        var flightTrails = {{}};
+        
+        // Use a plane icon for better visualization with increased size
+        function createPlaneIcon(color, heading) {{
+            // Create larger plane icon for better visibility
+            var planeSize = 36;
+            return L.divIcon({{
+                html: `<div style="transform: rotate(${{heading}}deg); width: ${{planeSize}}px; height: ${{planeSize}}px;">
+                         <svg viewBox="0 0 24 24" width="${{planeSize}}" height="${{planeSize}}">
+                           <path fill="${{color}}" d="M21,16V14L13,9V3.5A1.5,1.5 0 0,0 11.5,2A1.5,1.5 0 0,0 10,3.5V9L2,14V16L10,13.5V19L8,20.5V22L11.5,21L15,22V20.5L13,19V13.5L21,16Z" />
+                         </svg>
+                       </div>`,
+                className: '',
+                iconSize: [planeSize, planeSize],
+                iconAnchor: [planeSize/2, planeSize/2]
+            }});
+        }}
+        
+        // Create layer groups for better performance
+        var trailsLayer = L.layerGroup().addTo(mapObject);
+        var markersLayer = L.layerGroup().addTo(mapObject);
+        var pathsLayer = L.layerGroup().addTo(mapObject);
+        
         flights.forEach(function(flight) {{
             var tail = flight.tail;
             if (flight.points.length > 0) {{
-                // polyline
-                var poly = L.polyline([], {{color: 'red', weight: 3}}).addTo(mapObject);
-                flightPolylines[tail] = poly;
-
-                // marker at first point
-                var startLat = flight.points[0].lat;
-                var startLon = flight.points[0].lon;
-                var marker = L.marker([startLat, startLon]).addTo(mapObject);
+                var color = flight.color;
+                
+                // Create path with the right color
+                var path = L.polyline([], {{
+                    color: color,
+                    weight: 3,
+                    opacity: 0.7,
+                    smoothFactor: 1
+                }});
+                flightPaths[tail] = path;
+                pathsLayer.addLayer(path);
+                
+                // Create marker with plane icon
+                var startPoint = flight.points[0];
+                var marker = L.marker([startPoint.lat, startPoint.lon], {{
+                    icon: createPlaneIcon(color, startPoint.heading || 0)
+                }});
+                marker.bindTooltip(tail, {{permanent: false, direction: 'top', opacity: 0.8}});
                 flightMarkers[tail] = marker;
-
-                // store the earliest time
-                flightMinTime[tail] = flight.points[0].timestamp;
+                markersLayer.addLayer(marker);
+                
+                // Initialize empty trail
+                flightTrails[tail] = [];
             }}
         }});
 
-        // 4) Create a single alertBox for violations
+        // Create alert box for violations
         var alertBox = document.createElement('div');
         alertBox.style.position = 'absolute';
         alertBox.style.top = '10px';
@@ -136,76 +168,280 @@ def build_custom_js(m: folium.Map, flights, violations):
         alertBox.style.color = 'white';
         alertBox.style.fontSize = '18px';
         alertBox.style.display = 'none';
+        alertBox.style.borderRadius = '5px';
+        alertBox.style.boxShadow = '0 2px 10px rgba(0,0,0,0.3)';
+        alertBox.style.maxWidth = '80%';
+        alertBox.style.textAlign = 'center';
         document.body.appendChild(alertBox);
 
         function showAlert(msg, rec) {{
-            alertBox.innerHTML = msg + "<br/><b>" + rec + "</b>";
+            alertBox.innerHTML = `<strong>ALERT</strong><br>${{msg}}<br><b>${{rec}}</b>`;
             alertBox.style.display = 'block';
         }}
+        
         function hideAlert() {{
             alertBox.style.display = 'none';
         }}
 
-        // 5) Step from globalMinT to globalMaxT in 1-second increments (or whatever)
+        // Animation control variables
         var currentTime = globalMinT;
-
-        function stepSimulation() {{
-            if (currentTime > globalMaxT) {{
-                // done
-                hideAlert();
-                return;
-            }}
-
-            // For each flight, if currentTime >= flightMinTime, we pick the last known point up to currentTime
-            flights.forEach(function(flight) {{
-                var tail = flight.tail;
-                if (!flight.points.length) return; // skip empty
-
-                var minT = flightMinTime[tail];
-                if (currentTime < minT) return; // plane hasn't started
-
-                // find the last known point up to currentTime
-                var relevant = flight.points.filter(p => p.timestamp <= currentTime);
-                if (relevant.length > 0) {{
-                    var pt = relevant[relevant.length - 1];
-                    // update marker
-                    flightMarkers[tail].setLatLng([pt.lat, pt.lon]);
-
-                    // "literal marker": place small circle
-                    L.circleMarker([pt.lat, pt.lon], {{
-                        radius: 3,
-                        color: 'blue',
-                        fillColor: 'blue',
-                        fillOpacity: 0.7
-                    }}).addTo(mapObject);
-
-                    // extend the polyline
-                    var poly = flightPolylines[tail];
-                    var latlngs = poly.getLatLngs();
-                    latlngs.push([pt.lat, pt.lon]);
-                    poly.setLatLngs(latlngs);
-                }}
-            }});
-
-            // Check if there's a violation at this time
-            // Note: if your violations keys are floats, you might need parseFloat or rounding
-            var vkey = String(currentTime); // or parseFloat
-            if (violations[vkey]) {{
-                var v = violations[vkey];
-                showAlert(v.message, v.advisory);
-            }} else {{
-                hideAlert();
-            }}
-
-            var stepSize = 1; // flight-seconds
-            currentTime += stepSize;
-            console.log(currentTime)
-            setTimeout(stepSimulation, 1000);
+        var animationSpeed = 4;
+        var isPlaying = false;
+        var lastFrameTime = 0;
+        var animationFrame;
+        
+        // Format time display
+        function formatTimeDisplay(timestamp) {{
+            var seconds = Math.floor(timestamp - globalMinT);
+            var minutes = Math.floor(seconds / 60);
+            seconds = seconds % 60;
+            return `${{minutes.toString().padStart(2, '0')}}:${{seconds.toString().padStart(2, '0')}}`;
         }}
 
-        stepSimulation();
+        // Update time slider without triggering change event
+        function updateTimeSliderSilently(time) {{
+            var percentage = (time - globalMinT) / (globalMaxT - globalMinT) * 100;
+            timeSlider.value = percentage;
+            document.getElementById('current-time-display').textContent = formatTimeDisplay(time);
+        }}
+
+        // Animation step with requestAnimationFrame for smoother performance
+        function animationStep(timestamp) {{
+            if (!isPlaying) return;
+            
+            // Calculate time difference for consistent animation speed
+            if (!lastFrameTime) lastFrameTime = timestamp;
+            var elapsed = timestamp - lastFrameTime;
+            
+            // Only update if enough time has passed (based on animation speed)
+            if (elapsed > (1000 / animationSpeed)) {{
+                lastFrameTime = timestamp;
+                
+                // If reached the end, stop but keep final positions
+                if (currentTime >= globalMaxT) {{
+                    isPlaying = false;
+                    document.getElementById('play-pause').innerHTML = '▶️';
+                    // Don't hide alert if there's one at the end
+                    // Don't reset positions - keep planes at their final locations
+                    return;
+                }}
+                
+                // Step time forward by a amount appropriate for 4x speed
+                currentTime += 0.4;
+                
+                // Update positions
+                updatePositions(currentTime);
+                
+                // Update time display and slider
+                updateTimeSliderSilently(currentTime);
+            }}
+            
+            animationFrame = requestAnimationFrame(animationStep);
+        }}
+
+        // Update all flight positions for a given time
+        function updatePositions(time) {{
+            // Batch DOM updates for performance
+            flights.forEach(function(flight) {{
+                var tail = flight.tail;
+                if (!flight.points.length) return;
+                
+                // Find the last point before or at current time
+                var lastPointIndex = flight.points.findIndex(p => p.timestamp > time) - 1;
+                if (lastPointIndex < 0 && flight.points[0].timestamp <= time) lastPointIndex = 0;
+                if (lastPointIndex >= 0) {{
+                    var point = flight.points[lastPointIndex];
+                    var nextPoint = flight.points[lastPointIndex + 1];
+                    
+                    var pos, heading;
+                    if (nextPoint && nextPoint.timestamp <= time) {{
+                        // Exact point match
+                        pos = [point.lat, point.lon];
+                        heading = point.heading || 0;
+                    }} else if (nextPoint) {{
+                        // Interpolate between points for smoother motion
+                        var ratio = (time - point.timestamp) / (nextPoint.timestamp - point.timestamp);
+                        ratio = Math.min(1, Math.max(0, ratio)); // Clamp between 0 and 1
+                        
+                        pos = [
+                            point.lat + (nextPoint.lat - point.lat) * ratio,
+                            point.lon + (nextPoint.lon - point.lon) * ratio
+                        ];
+                        
+                        // Interpolate heading
+                        var headingDiff = (nextPoint.heading || 0) - (point.heading || 0);
+                        // Handle angle wrapping
+                        if (headingDiff > 180) headingDiff -= 360;
+                        if (headingDiff < -180) headingDiff += 360;
+                        heading = (point.heading || 0) + headingDiff * ratio;
+                    }} else {{
+                        // Just use the last point
+                        pos = [point.lat, point.lon];
+                        heading = point.heading || 0;
+                    }}
+                    
+                    // Update marker position and rotation
+                    var marker = flightMarkers[tail];
+                    marker.setLatLng(pos);
+                    
+                    // Update plane icon rotation
+                    var icon = createPlaneIcon(flight.color, heading);
+                    marker.setIcon(icon);
+                    
+                    // Add to trail (only every few points for performance)
+                    if (flightTrails[tail].length === 0 || 
+                        L.latLng(flightTrails[tail][flightTrails[tail].length-1]).distanceTo(L.latLng(pos)) > 50) {{
+                        flightTrails[tail].push(pos);
+                        
+                        // Update path - use the efficient setLatLngs method
+                        flightPaths[tail].setLatLngs(flightTrails[tail]);
+                    }}
+                }}
+            }});
+            
+            // Check for violations at this time
+            checkViolations(time);
+        }}
+        
+        // Store the current violation to keep it visible longer
+        var currentViolation = null;
+        var violationStartTime = 0;
+        var violationDisplayDuration = 10; // Show violations for 10 seconds
+        
+        // Check for violations near the current time
+        function checkViolations(time) {{
+            // Find violations within a small time window
+            var found = false;
+            Object.keys(violations).forEach(function(vtime) {{
+                var t = parseFloat(vtime);
+                if (Math.abs(t - time) < 1) {{ // Within 1 second tolerance
+                    var v = violations[vtime];
+                    showAlert(v.message, v.advisory);
+                    currentViolation = v;
+                    violationStartTime = time;
+                    found = true;
+                }}
+            }});
+            
+            // Keep showing existing violation for the duration
+            if (!found && currentViolation) {{
+                if (time - violationStartTime < violationDisplayDuration) {{
+                    // Keep showing the current violation
+                    showAlert(currentViolation.message, currentViolation.advisory);
+                    found = true;
+                }} else {{
+                    // Clear the violation after duration
+                    currentViolation = null;
+                }}
+            }}
+            
+            if (!found) {{
+                hideAlert();
+            }}
+        }}
+        
+        // Control panel event handlers
+        document.getElementById('play-pause').addEventListener('click', function() {{
+            isPlaying = !isPlaying;
+            this.innerHTML = isPlaying ? '⏸️' : '▶️';
+            
+            if (isPlaying) {{
+                // If at the end, start over
+                if (currentTime >= globalMaxT) {{
+                    currentTime = globalMinT;
+                    // Reset trails
+                    flights.forEach(function(flight) {{
+                        var tail = flight.tail;
+                        if (flightTrails[tail]) {{
+                            flightTrails[tail] = [];
+                            flightPaths[tail].setLatLngs([]);
+                        }}
+                    }});
+                }}
+                
+                lastFrameTime = 0;
+                animationFrame = requestAnimationFrame(animationStep);
+            }} else {{
+                cancelAnimationFrame(animationFrame);
+            }}
+        }});
+        
+        // Speed slider control
+        document.getElementById('speed-slider').addEventListener('input', function() {{
+            animationSpeed = parseInt(this.value);
+            document.getElementById('speed-value').textContent = animationSpeed + 'x';
+        }});
+        
+        // Time slider control
+        document.getElementById('time-slider').addEventListener('input', function() {{
+            // Pause animation while scrubbing
+            var wasPlaying = isPlaying;
+            if (isPlaying) {{
+                isPlaying = false;
+                cancelAnimationFrame(animationFrame);
+            }}
+            
+            // Calculate time based on slider position
+            var percentage = parseInt(this.value) / 100;
+            currentTime = globalMinT + (globalMaxT - globalMinT) * percentage;
+            
+            // Only reset trails if going back in time
+            var currentPercentage = (currentTime - globalMinT) / (globalMaxT - globalMinT) * 100;
+            if (parseInt(this.value) < currentPercentage) {{
+                flights.forEach(function(flight) {{
+                    var tail = flight.tail;
+                    if (flightTrails[tail]) {{
+                        flightTrails[tail] = [];
+                        flightPaths[tail].setLatLngs([]);
+                    }}
+                }});
+            }}
+            
+            // Update display
+            document.getElementById('current-time-display').textContent = formatTimeDisplay(currentTime);
+            
+            // Rebuild trails up to current time
+            var stepTime = globalMinT;
+            var timeStep = Math.max(1, (currentTime - globalMinT) / 100); // Divide into 100 steps max
+            
+            while (stepTime < currentTime) {{
+                updatePositions(stepTime);
+                stepTime += timeStep;
+            }}
+            
+            // Final update at exactly the target time
+            updatePositions(currentTime);
+            
+            // Resume if it was playing before
+            if (wasPlaying) {{
+                isPlaying = true;
+                lastFrameTime = 0;
+                animationFrame = requestAnimationFrame(animationStep);
+            }}
+        }});
+        
+        // Initialize positions
+        updatePositions(globalMinT);
+        
+        // Auto-start playback
+        document.getElementById('play-pause').click();
     }});
     </script>
+    
+    <style>
+    /* Custom CSS for better visualization */
+    .leaflet-popup-content-wrapper {{
+        border-radius: 5px;
+    }}
+    .leaflet-tooltip {{
+        background-color: rgba(0, 0, 0, 0.7);
+        color: white;
+        border: none;
+        padding: 5px 10px;
+        font-weight: bold;
+        border-radius: 3px;
+    }}
+    </style>
     """
     return Element(custom_js)
 
@@ -216,17 +452,17 @@ def build_animated_map(center_lat: float, center_lon: float,
                        flagged_events: List[Dict],
                        animation_speed: float = 1.0) -> folium.Map:
     """
-    Constructs an interactive Folium map that:
-      1) Displays static features (runways/taxiways),
-      2) Animates flight paths step by step, applying a speed coefficient,
-      3) Shows a persistent on-map alert when a compliance violation occurs,
-         with the recommended command from your recommendation engine.
+    Constructs an interactive Folium map with improved performance
+    and visual display of flight paths and runway incursions.
     """
 
-    # ----------------------------------------------------------------
-    # 1) Create the base Folium map
-    # ----------------------------------------------------------------
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=14, tiles="cartodbpositron")
+    # Create the base Folium map with a better basemap
+    m = folium.Map(
+        location=[center_lat, center_lon], 
+        zoom_start=14, 
+        tiles="CartoDB Positron",
+        control_scale=True
+    )
 
     # Add mouse-position plugin
     MousePosition(
@@ -237,37 +473,48 @@ def build_animated_map(center_lat: float, center_lon: float,
         lng_formatter="function(num) {return L.Util.formatNum(num, 5);}"
     ).add_to(m)
 
-    # ----------------------------------------------------------------
-    # 2) Add static features: runways & taxiways
-    # ----------------------------------------------------------------
+    # Add static features: runways & taxiways with improved styling
     runways, taxiways = static_features
     if not runways.empty:
         folium.GeoJson(
             runways.__geo_interface__,
             name="Runways",
-            style_function=lambda f: {'color': 'orange', 'weight': 2, 'fillOpacity': 0.2},
-            tooltip=folium.GeoJsonTooltip(fields=["ref", "name"], aliases=["Ref", "Name"], localize=True)
+            style_function=lambda f: {
+                'color': '#ff7700', 
+                'weight': 3, 
+                'fillOpacity': 0.3,
+                'fillColor': '#ffaa00'
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=["ref", "name"], 
+                aliases=["Runway", "Name"], 
+                localize=True,
+                sticky=True
+            )
         ).add_to(m)
+    
     if not taxiways.empty:
         folium.GeoJson(
             taxiways.__geo_interface__,
             name="Taxiways",
-            style_function=lambda f: {'color': 'lightgray', 'weight': 2, 'fillOpacity': 0.2},
-            tooltip=folium.GeoJsonTooltip(fields=["ref", "name"], aliases=["Ref", "Name"], localize=True)
+            style_function=lambda f: {
+                'color': '#95c5e8', 
+                'weight': 2, 
+                'fillOpacity': 0.2,
+                'fillColor': '#c7e1f6'
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=["ref", "name"], 
+                aliases=["Taxiway", "Name"], 
+                localize=True,
+                sticky=True
+            )
         ).add_to(m)
 
-    # ----------------------------------------------------------------
-    # 3) Prepare data for animation in JavaScript
-    # ----------------------------------------------------------------
-    # We'll create arrays of data for each flight's positions, sorted by time.
-    # Also store violation info keyed by timestamp if desired.
-    # For real usage, you may prefer to unify all flight data into a single array
-    # sorted by time. This is just a simplified example.
+    # Prepare flight data for animation
     flight_data_js = []
     for tail, df in plane_histories.items():
-        # Sort by ascending timestamp
         df_sorted = df.sort_values("Timestamp")
-        # We'll build a simple list of {lat, lon, speed, time, tail} per row
         points_list = []
         for _, row in df_sorted.iterrows():
             points_list.append({
@@ -283,36 +530,34 @@ def build_animated_map(center_lat: float, center_lon: float,
             "color": get_plane_color(tail)
         })
 
-    # Also create a dictionary for flagged events keyed by the exact timestamp:
-    # If multiple events share the same timestamp, we can unify them as well.
-    # e.g. flagged_events = [{ "timestamp": 1740494872, "message": "...", "advisory": "...", etc. }, ...]
-    # We'll store them in a dictionary for quick lookup:
+    # Create violations dictionary with improved formatting
     violations_by_time = {}
     for ev in flagged_events:
         ts = ev["timestamp"]
         violations_by_time[ts] = {
             "message": ev["message"],
             "tail": ev["tail"],
-            "advisory": ev["advisory"],  # or "recommendation"
+            "advisory": ev["advisory"],
             "prediction": ev["prediction"]
         }
 
-    # We'll embed these data structures in the HTML/JS as JSON strings
-    import json
+    # Convert to JSON for embedding in JS
     flight_data_json = json.dumps(flight_data_js)
     violations_json = json.dumps(violations_by_time)
 
-    # Convert animation_speed to a "millisecond" step in JS
-    # e.g. if animation_speed=2.0, we might want to move 2 times faster.
-    # We'll define a base interval (like 500ms) and scale it:
-    base_interval_ms = 500  # base = half a second
-    animation_interval = int(base_interval_ms / animation_speed)
+    # Calculate animation interval based on speed
+    animation_interval = int(50 / animation_speed)  # 50ms base / speed modifier
 
-    custom_js = build_custom_js(m, flights=flight_data_json, violations=violations_json)
-    custom_element = custom_js
-
-    # Add the custom element to the map's HTML
+    # Add the custom JavaScript to the map
+    custom_element = build_custom_js(
+        m, 
+        flights=flight_data_json, 
+        violations=violations_json,
+        animation_interval=animation_interval
+    )
     m.get_root().html.add_child(custom_element)
 
+    # Add layer control
     folium.LayerControl().add_to(m)
+    
     return m

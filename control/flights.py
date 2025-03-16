@@ -21,7 +21,7 @@ class Flights:
         FLAGGED_INCURSIONS = {}
         self.FLAGGED_INCURSIONS = FLAGGED_INCURSIONS
 
-        self.interval = 60
+        self.interval = 10
     
     def _getFlaggedIncursions(self):
         return self.FLAGGED_INCURSIONS
