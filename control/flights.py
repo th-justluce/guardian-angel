@@ -21,7 +21,7 @@ class Flights:
         FLAGGED_INCURSIONS = {}
         self.FLAGGED_INCURSIONS = FLAGGED_INCURSIONS
 
-        self.interval = 10
+        self.interval = 5
     
     def _getFlaggedIncursions(self):
         return self.FLAGGED_INCURSIONS
@@ -165,40 +165,6 @@ class Flights:
                             "advisory": recommendation["advisory"]
                         }
 
-        # 2) Special rule for system's plane (FlexJet 560) crossing runway that
-        #    Southwest 2504 is CLEARED_TO_LAND on
-        if plane == self.map_flight_identifier("FlexJet 560"):
-            logger.debug("Checking if FlexJet 560 crosses runway cleared for Southwest 2504...")
-            sw_instr = next(
-                (instr for instr in instructions 
-                 if self.map_flight_identifier(instr["plane"]) == self.map_flight_identifier("Southwest 2504")
-                 and instr["instr"] == "CLEARED_TO_LAND"),
-                None
-            )
-            if sw_instr:
-                runway_ref = sw_instr["reference"]
-                runway_geom = self.get_feature_geometry(runway_ref, static_features)
-                runway_geom = runway_geom.buffer(20)
-                if runway_geom is not None and flight_line.intersects(runway_geom):
-                    logger.debug(f"FlexJet 560 incursion on {runway_ref} with Southwest 2504 cleared to land.")
-                    violation_msg = (
-                        f"Non-compliant: FlexJet 560 is crossing runway {runway_ref} "
-                        f"where Southwest 2504 is landing."
-                    )
-                    recommendation = self.recommend_action(violation_msg)
-                    return {
-                        "message": violation_msg,
-                        "ref": runway_ref,
-                        "timestamp": current_time,
-                        "lat": current_lat,
-                        "lon": current_lon,
-                        "speed": speed,
-                        "heading": bearing,
-                        "interval": self.interval,
-                        "prediction": recommendation["prediction"],
-                        "advisory": recommendation["advisory"]
-                    }
-
         logger.debug("No compliance violations detected.")
         return {"message": "In compliance", "ref": ""}
 
@@ -206,7 +172,7 @@ class Flights:
                                plane_histories: Dict[str, pd.DataFrame],
                                instructions: List[Dict],
                                static_features: List[gpd.GeoDataFrame],
-                               interval: int = 60) -> List[Dict]:
+                               interval: int = 5) -> List[Dict]:
         """
         Iterates through flight history (for all planes).
         For each record, we now consider the line from the previous record
@@ -270,7 +236,7 @@ class Flights:
                                   plane_histories: Dict[str, pd.DataFrame],
                                   instructions: List[Dict],
                                   static_features: List[gpd.GeoDataFrame],
-                                  interval: int = 60) -> Dict:
+                                  interval: int = 5) -> Dict:
         """
         Builds GeoJSON features for all flights, showing:
           - Historical path (LineString) for each plane
