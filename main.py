@@ -7,14 +7,9 @@ from control.visualize import build_animated_map
 from geopy.distance import distance
 
 def log_violations(incursions: dict):
-    VIOLATIONS = []
-    for _, value in incursions.items():
-        VIOLATIONS.append(value)
-    
     print(f"\nNature of incursions (set length: {len(incursions)}):")
     print("----------------------------------------------------------------------------------------------------------------")
-    val: dict
-    for val in VIOLATIONS:
+    for _, val in incursions.items():
         reason = val.get('message')
         toi = val.get('timestamp')
         speed = val.get('speed')
