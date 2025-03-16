@@ -1,11 +1,8 @@
-import logging
 from shapely.geometry import LineString
-from geopy.distance import distance
 from typing import List, Dict
 import geopandas as gpd
 import pandas as pd
-
-from .visualize import get_plane_color
+import logging
 
 class Flights:
     def __init__(self):
@@ -62,9 +59,8 @@ class Flights:
     
     def recommend_action(self, violation_msg: str) -> Dict[str, str]:
         """
-        Returns an immediate, short pilot command (e.g. "STOP NOW") plus
-        a concise rationale based on the violation message.
-        The pilot shouldn't need to respond or interpret beyond direct instinct.
+        Returns a concise, actionable pilot command (e.g. "STOP NOW") plus
+        a reasonably expected outcome in the system's absence based on  violation message.
         """
         # Basic rule-based approach: parse or match keywords in violation_msg
         # and produce a succinct recommended action + predicted outcome.
@@ -129,13 +125,11 @@ class Flights:
                             instructions: List[Dict]) -> Dict[str, str]:
         """
         Checks:
-         (1) If there's a HOLD_SHORT / HOLD_POSITION in effect, ensure no crossing occurs
-             of the instructed feature unless CLEAR_TO_CROSS is found.
-         (2) If plane is 'FlexJet 560', ensure it doesn't cross the runway that
-             'Southwest 2504' is cleared to land on.
+            If there's a HOLD_SHORT / HOLD_POSITION in effect, ensure no crossing occurs
+            of the instructed feature unless CLEAR_TO_CROSS is found.
 
-        We now form a line from the real flight path (prev → current). If that line
-        intersects the relevant geometry (and no clearance is found), we flag it.
+        We now form a line from the real flight path (current → predicted). If that line
+        intersects the relevant geometry (and no clearance was given), we flag it.
         """
         logger = self.logger
         logger.debug(f"evaluate_compliance called for plane={plane} at time={current_time}")
@@ -201,9 +195,9 @@ class Flights:
                                interval: int = 5) -> List[Dict]:
         """
         Iterates through flight history (for all planes).
-        For each record, we now consider the line from the previous record
-        to the current record. If the line intersects a geometry that should not be
-        crossed, logs a violation.
+        For each record, we now consider the line from the current record
+        to the predicted record. If the line intersects a geometry that should 
+        not be crossed, logs a violation.
         """
         logger = self.logger
         self.interval = interval
@@ -246,7 +240,7 @@ class Flights:
                     speed=row["Speed"],
                     bearing=row["Direction"],
                     static_features=static_features,
-                    current_time=row["Timestamp"] + dt_sec,
+                    current_time=row["Timestamp"] + (dt_sec*0.8),
                     instructions=instructions
                 )
 
@@ -269,104 +263,6 @@ class Flights:
                         print(f"[EARLY WARNING] {tail}: {result['message']} at t+{dt_sec}s")
                         events.append(self.FLAGGED_INCURSIONS[key])
 
-                prev_row = row  # Update prev_row for next iteration
+                prev_row = row  # Update for next iteration
         logger.debug("log_flagged_incursions completed.")
         return events
-
-    def build_flight_path_geojson(self,
-                                  plane_histories: Dict[str, pd.DataFrame],
-                                  instructions: List[Dict],
-                                  static_features: List[gpd.GeoDataFrame],
-                                  interval: int = 5) -> Dict:
-        """
-        Builds GeoJSON features for all flights, showing:
-          - Historical path (LineString) for each plane
-          - Current position (Point)
-          - Predicted position (Point) for the system plane
-          - Projected path (LineString) for the system plane
-        """
-        logger = self.logger
-        logger.debug("build_flight_path_geojson called.")
-
-        features = []
-        system_plane = self.map_flight_identifier("FlexJet 560")
-
-        for tail, df in plane_histories.items():
-            # df = df.sort_values("Timestamp")
-            if df.empty:
-                logger.debug(f"Skipping plane={tail}, no data in timeframe.")
-                continue
-
-            color = get_plane_color(tail)
-            logger.debug(
-                f"Building features for plane={tail}, color={color}, total_records={len(df)}."
-            )
-
-            # Full historical path
-            coords_hist = [[row["lon"], row["lat"]] for _, row in df.iterrows()]
-            if len(coords_hist) > 1:
-                features.append({
-                    "type": "Feature",
-                    "geometry": {"type": "LineString", "coordinates": coords_hist},
-                    "properties": {
-                        "lineType": "history",
-                        "tail_number": tail,
-                        "planeColor": color
-                    }
-                })
-
-            # Current position marker (last row)
-            last_row = df.iloc[-1]
-            lat = last_row["lat"]
-            lon = last_row["lon"]
-            tstamp = last_row["Timestamp"]
-            speed = last_row["Speed"]
-            bearing = last_row["Direction"]
-
-            features.append({
-                "type": "Feature",
-                "geometry": {"type": "Point", "coordinates": [lon, lat]},
-                "properties": {
-                    "markerType": "current",
-                    "tail_number": tail,
-                    "timestamp": tstamp,
-                    "speed": speed
-                }
-            })
-
-            # Optional: Also display a predicted marker & path for the system plane
-            if tail == system_plane:
-                logger.debug(f"Adding projected path for system_plane={tail}.")
-                # Basic example: "predict" 60s ahead
-                # We keep this for display, though your real violation check
-                # is now in the "previous → current" approach in log_flagged_incursions
-                pred_lat, pred_lon = self.project_position(lat, lon, bearing, speed, interval)
-
-                # Evaluate compliance purely for a visual note (optional)
-                compliance_result = {
-                    "message": "In compliance"
-                }  # Or call self.evaluate_compliance if you also want to see predicted incursion warnings
-
-                features.append({
-                    "type": "Feature",
-                    "geometry": {"type": "Point", "predicted-coords": [pred_lon, pred_lat]},
-                    "properties": {
-                        "markerType": "predicted",
-                        "tail_number": tail,
-                        "timestamp": tstamp,
-                        "speed": speed,
-                        "compliance": compliance_result["message"]
-                    }
-                })
-                features.append({
-                    "type": "Feature",
-                    "geometry": {"type": "LineString", "actual-to-pred-coords": [[lon, lat], [pred_lon, pred_lat]]},
-                    "properties": {
-                        "lineType": "projected",
-                        "tail_number": tail,
-                        "planeColor": color
-                    }
-                })
-
-        logger.debug("build_flight_path_geojson completed.")
-        return {"type": "FeatureCollection", "features": features}

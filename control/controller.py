@@ -1,14 +1,34 @@
-from adsb.adsb_manager import AircraftTracker
+from adsb_manager import AircraftTracker
+from flights import Flights
+from pandas import DataFrame
 
-from control.features import assimilate_routes, generate_static_features
-from control.flights import Flights
-from control.visualize import build_animated_map
-
+from features import assimilate_routes, generate_static_features
+from visualize import build_animated_map
 from geopy.distance import distance
+
+def guardian_setup(plane_histories, center_lat, center_lon):
+    # Force the start time to align with ATC tower audio timing
+    forced_start = 1740494856 - 15
+    
+    for tail, df in plane_histories.items():
+        plane_histories[tail] = df[(df["Timestamp"] >= forced_start)]
+    flights: Flights = Flights()
+
+    southwest_tail = flights.map_flight_identifier("Southwest 2504")
+    arrival_time = None
+    if southwest_tail in plane_histories:
+        for _, row in plane_histories[southwest_tail].sort_values("Timestamp").iterrows():
+            if distance((row["lat"], row["lon"]), (center_lat, center_lon)).meters < 500:
+                arrival_time = row["Timestamp"]
+                break
+        if arrival_time is None:
+            arrival_time = plane_histories[southwest_tail]["Timestamp"].min()
+    return flights, plane_histories
 
 def log_violations(incursions: dict):
     print(f"\nNature of incursions (set length: {len(incursions)}):")
     print("----------------------------------------------------------------------------------------------------------------")
+    val: dict
     for _, val in incursions.items():
         reason = val.get('message')
         toi = val.get('timestamp')
@@ -54,47 +74,27 @@ def main():
     for tail, df in tracker.aircraft_data.items():
         if max(df["Timestamp"]) > query_ts:
             query_ts = max(df["Timestamp"])
-        subset = df[df["Timestamp"] <= query_ts]
+        subset: DataFrame = df[df["Timestamp"] <= query_ts]
         if not subset.empty:
             plane_histories[tail] = subset
     
-    # Initialize a time buffer between the first and last ATC instructions
-    forced_start = 1740494856 - 15
-    forced_end = 1740494920 + 15
+    # 3) Set up guardian system with helper instances and thresholds
+    flights, plane_histories = guardian_setup(plane_histories, center_lat, center_lon)
     
-    for tail, df in plane_histories.items():
-        plane_histories[tail] = df[(df["Timestamp"] >= forced_start)]
-    # for tail, df in plane_histories.items():
-    #     plane_histories[tail] = df[(df["Timestamp"] <= forced_end)]
-    flights = Flights()
-
-    southwest_tail = flights.map_flight_identifier("Southwest 2504")
-    arrival_time = None
-    if southwest_tail in plane_histories:
-        for _, row in plane_histories[southwest_tail].sort_values("Timestamp").iterrows():
-            if distance((row["lat"], row["lon"]), (center_lat, center_lon)).meters < 500:
-                arrival_time = row["Timestamp"]
-                break
-        if arrival_time is None:
-            arrival_time = plane_histories[southwest_tail]["Timestamp"].min()
-    
-    # 3) Log flagged incursions (only the first occurrence per plane/ref)
+    # 4) Log flagged incursions (only the first occurrence per plane/ref)
     flagged_events = flights.log_flagged_incursions(plane_histories, instructions, static_feats, interval=30)
-    
-    # 4) Build flight path GeoJSON (including optional compliance checks)
-    flight_geojson = flights.build_flight_path_geojson(plane_histories, instructions, static_feats, interval=30)
-    
+        
     # 5) Create and save the interactive map
     folium_map = build_animated_map(
         center_lat, center_lon,
         static_feats,
-        flight_geojson,
         plane_histories,
         flagged_events,
         animation_speed=50.0  # e.g. double speed
     )
     folium_map.save("kmdw_interactive_flight_map.html")
 
+    # 6) List incursions within specified filter range
     FLAGGED_INCURSIONS = flights._getFlaggedIncursions()
     log_violations(FLAGGED_INCURSIONS)
 

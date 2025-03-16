@@ -1,10 +1,11 @@
 import folium
-from folium.plugins import MousePosition
-from folium.elements import Element
-from typing import List, Dict
 import geopandas as gpd
 import pandas as pd
 import json
+
+from folium.plugins import MousePosition
+from folium.elements import Element
+from typing import List, Dict
 
 # Global plane color mapping and palette with better contrasting colors
 PLANE_COLORS = {}
@@ -21,13 +22,14 @@ def get_plane_color(tail: str) -> str:
         PLANE_COLORS[tail] = COLOR_PALETTE[index]
     return PLANE_COLORS[tail]
 
-def build_custom_js(m: folium.Map, flights, violations, animation_interval=20):
+def build_custom_js(m: folium.Map, flights, violations):
     """
-    Build custom JavaScript for map animation with performance optimizations:
+    Build custom JavaScript for Folium map animation with performance optimizations:
     - Use requestAnimationFrame instead of setTimeout
     - Batch DOM operations
     - Reduce marker creation by using a single marker for each flight
     - Optimize polyline updates
+    - Path interpolation for performance improvements
     - Add time controls for playback
     """
     map_name = m.get_name()
@@ -134,7 +136,6 @@ def build_custom_js(m: folium.Map, flights, violations, animation_interval=20):
         var flightPaths = {{}};
         var flightTrails = {{}};
 
-        // NEW OR MODIFIED CODE:
         // We'll store a separate dashed polyline for predicted paths.
         var flightPredictions = {{}};
         
@@ -186,8 +187,7 @@ def build_custom_js(m: folium.Map, flights, violations, animation_interval=20):
                 // Initialize empty trail
                 flightTrails[tail] = [];
 
-                // NEW OR MODIFIED CODE:
-                // If the flight dictionary has predictedLat/predictedLon, create a dashed polyline for it.
+                // If the flight dictionary has not been initialized to a tail, create a dashed polyline for it.
                 if (!flightPredictions[tail]) {{
                     var predictedLine = L.polyline([], {{
                         color: color,
@@ -347,7 +347,6 @@ def build_custom_js(m: folium.Map, flights, violations, animation_interval=20):
                         flightPaths[tail].setLatLngs(flightTrails[tail]);
                     }}
 
-                    // NEW OR MODIFIED CODE:
                     // If there is a prediction line for this flight, update its lat/lng 
                     // to go from the current position to the predicted position.
                     if (flightPredictions[tail]) {{
@@ -506,7 +505,6 @@ def build_custom_js(m: folium.Map, flights, violations, animation_interval=20):
 
 def build_animated_map(center_lat: float, center_lon: float,
                        static_features: List[gpd.GeoDataFrame],
-                       flight_geojson: Dict,
                        plane_histories: Dict[str, pd.DataFrame],
                        flagged_events: List[Dict],
                        animation_speed: float = 1.0) -> folium.Map:
@@ -514,7 +512,6 @@ def build_animated_map(center_lat: float, center_lon: float,
     Constructs an interactive Folium map with improved performance
     and visual display of flight paths and runway incursions.
     """
-
     # Create the base Folium map
     m = folium.Map(
         location=[center_lat, center_lon], 
@@ -582,10 +579,6 @@ def build_animated_map(center_lat: float, center_lon: float,
             speed = row.get("Speed", 0)
             bearing = row.get("Direction", 0)
             timestamp = row["Timestamp"]
-            # from geopy.distance import distance
-            # distance_ahead = speed * 5.0
-            # destination = distance(meters=distance_ahead).destination((lat, lon), bearing)
-            # pred_lat, pred_lon = destination.latitude, destination.longitude
             points_list.append({
                 "lat": lat,
                 "lon": lon,
@@ -624,12 +617,9 @@ def build_animated_map(center_lat: float, center_lon: float,
     custom_element = build_custom_js(
         m, 
         flights=flight_data_json, 
-        violations=violations_json,
-        animation_interval=animation_interval
+        violations=violations_json
     )
     m.get_root().html.add_child(custom_element)
-
-    # Add layer control
     folium.LayerControl().add_to(m)
     
     return m
