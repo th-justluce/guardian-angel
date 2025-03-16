@@ -1,14 +1,11 @@
 import os
 import json
 import re
-from dotenv import load_dotenv
-from litellm import completion
 from transformers import pipeline
 
 CACHE_FOLDER = 'cache'
 OPEN_AI_WHISPER = "openai/whisper-small"
 
-load_dotenv()
 os.makedirs(CACHE_FOLDER, exist_ok=True)
 
 # Global settings for timestamp adjustment.
@@ -165,6 +162,7 @@ if raw_transcription is None:
     pipe = pipeline("automatic-speech-recognition", model=OPEN_AI_WHISPER)
     raw_transcription = pipe(audio_file, return_timestamps='word')
     save_cached_transcription(audio_file, raw_transcription)
+
 else:
     print("Using cached transcription.")
 
@@ -200,7 +198,7 @@ openai_cache_file = os.path.join(CACHE_FOLDER, openai_cache_file)
 if os.path.exists(openai_cache_file):
     with open(openai_cache_file, "r") as f:
         print(f"Loading cached OpenAI response from {openai_cache_file}")
-        openai_response = json.load(f)
+        parsed_json = json.load(f)
 else:
     from llama_cpp import Llama
 
