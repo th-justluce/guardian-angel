@@ -5,12 +5,16 @@ from dotenv import load_dotenv
 from litellm import completion
 from transformers import pipeline
 
-
 CACHE_FOLDER = 'cache'
 OPEN_AI_WHISPER = "openai/whisper-large-v3"
 
 load_dotenv()
 os.makedirs(CACHE_FOLDER, exist_ok=True)
+
+# Global settings for timestamp adjustment.
+TIME_OFFSET = 1740494847
+ADJUST_TIME = True    # Set to False if you want to leave timestamps unmodified.
+ADD_OFFSET = True     # Set to False to subtract the relative time from TIME_OFFSET.
 
 # ---------------------------
 # Caching functions for transcription
@@ -99,6 +103,34 @@ def group_chunks_by_punctuation(cleaned_chunks):
     return grouped
 
 # ---------------------------
+# Timestamp adjustment helper function
+# ---------------------------
+def adjust_timecodes(transcription, offset=1740542404, add=True):
+    """
+    Adjusts all time codes in the transcription. For each timestamp (a tuple of (start, end)):
+      - If add is True: new time = (start + offset, end + offset)
+      - If add is False: new time = (offset - end, offset - start)
+    This function updates timestamps for both individual 'chunks' and the grouped 'punctuation_chunks'.
+    """
+    def adjust(ts):
+        start, end = ts
+        if add:
+            return (start + offset, end + offset)
+        else:
+            # Swap start and end when subtracting so that start < end.
+            return (offset - end, offset - start)
+    
+    if 'chunks' in transcription:
+        for chunk in transcription['chunks']:
+            if 'timestamp' in chunk:
+                chunk['timestamp'] = adjust(chunk['timestamp'])
+    if 'punctuation_chunks' in transcription:
+        for segment in transcription['punctuation_chunks']:
+            if 'timestamp' in segment:
+                segment['timestamp'] = adjust(segment['timestamp'])
+    return transcription
+
+# ---------------------------
 # Post-processing
 # ---------------------------
 def post_process_transcription(transcription, audio_file=None):
@@ -138,6 +170,11 @@ else:
 
 # Post-process the transcription.
 processed_transcription = post_process_transcription(raw_transcription, audio_file=audio_file)
+
+# Apply timestamp adjustments if desired.
+if ADJUST_TIME:
+    processed_transcription = adjust_timecodes(processed_transcription, offset=TIME_OFFSET, add=ADD_OFFSET)
+
 print("Processed transcription:")
 print(json.dumps(processed_transcription, indent=2))
 
@@ -158,8 +195,8 @@ formatted_prompt = prompt_template.format(
 
 # 2) Cache the OpenAI response.
 openai_cache_file = os.path.splitext(audio_file)[0] + "_openai_response.json"
-
 openai_cache_file = os.path.join(CACHE_FOLDER, openai_cache_file)
+
 if os.path.exists(openai_cache_file):
     with open(openai_cache_file, "r") as f:
         print(f"Loading cached OpenAI response from {openai_cache_file}")

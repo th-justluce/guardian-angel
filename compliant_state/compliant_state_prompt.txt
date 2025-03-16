@@ -9,6 +9,7 @@ For example if JetBlue 346 is being told to cross runway three one center and ho
 
 Note, in moments of silence, a word may be repeated for the duration of the silence. Disregard it. Additionally, the only valid commands come from the Tower. Use context to determine if the command is coming from the tower or is simply a readback, a question, or going over previous instruction (i.e. I told you to do this… We don’t care about the past, just what’s happening now)
 Runways should be given in a singular letter format. i.e. (14 center -> 14C, 11 left -> 11L, etc.)
+Account and correct for callsigns that may have been mumbled or slightly off. If the numbers are the same, odds are, the start of the callsign is the same too. Fix it, if they're similiar, label them the same plane.
 The raw transcript is below:
 ```
 {RAW_TRANSCRIPT}
