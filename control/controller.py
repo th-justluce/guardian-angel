@@ -1,4 +1,4 @@
-from adsb_manager import AircraftTracker
+from adsb.adsb_manager import AircraftTracker
 from flights import Flights
 from pandas import DataFrame
 

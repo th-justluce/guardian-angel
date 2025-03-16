@@ -1,0 +1,17 @@
+# Core data science / mapping libraries
+pandas==2.2.3
+numpy==2.2.3
+matplotlib==3.10.1
+
+# Web / I/O
+requests==2.32.3
+
+# Geospatial libraries
+geopandas==1.0.1
+osmnx==2.0.1
+shapely==2.0.7
+geopy==2.4.1
+
+# Mapping / visualization
+folium==0.19.5
+cartopy==0.24.1
