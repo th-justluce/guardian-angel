@@ -1,18 +1,48 @@
-import sys
-from typing import Dict, List
-
+import math
+import json
+import folium
 import osmnx as ox
-import pandas as pd
 import geopandas as gpd
-
+import pandas as pd
+from typing import List, Dict, Tuple
 from geopy.distance import distance
 from shapely.geometry import LineString
+from folium.plugins import MousePosition
 
-import folium
+from adsb.adsb_manager import AircraftTracker
 
+# Global dictionary for unique plane colors
+plane_colors = {}
+color_palette = [
+    "purple", "green", "blue", "orange", "brown",
+    "pink", "gray", "black", "red", "cadetblue",
+    "darkgreen", "darkpurple"
+]
+
+def get_plane_color(tail: str) -> str:
+    """Returns a unique color for each plane, cycling through a palette."""
+    if tail not in plane_colors:
+        index = len(plane_colors) % len(color_palette)
+        plane_colors[tail] = color_palette[index]
+    return plane_colors[tail]
+
+# Global dictionary to store first flagged incursion events.
+# Keys are (tail, instruction_ref) and values are event info.
+flagged_incursions = {}
+
+# -------------------------------------------------------------------
+# Global logic for static features
+# -------------------------------------------------------------------
 def assimilate_routes() -> gpd.GeoDataFrame:
+    """
+    Loads static airport data using OSMnx with a custom filter.
+    """
     airport_icao_code = "KMDW"
-    osm_filter = '["aeroway"~"runway|taxiway|apron|control_tower|control_center|gate|hangar|helipad|heliport|navigationaid|taxilane|terminal|windsock|highway_strip|parking_position|holding_position|airstrip|stopway|tower"]'
+    osm_filter = (
+        '["aeroway"~"runway|taxiway|apron|control_tower|control_center|gate|hangar|'
+        'helipad|heliport|navigationaid|taxilane|terminal|windsock|highway_strip|'
+        'parking_position|holding_position|airstrip|stopway|tower"]'
+    )
     G = ox.graph_from_place(
         airport_icao_code,
         simplify=False,
@@ -20,45 +50,42 @@ def assimilate_routes() -> gpd.GeoDataFrame:
         truncate_by_edge=True,
         custom_filter=osm_filter,
     )
-
-    # Convert the graph to GeoDataFrame and return
     _, gdf_edges = ox.graph_to_gdfs(G)
     return gdf_edges
 
-def generate_map(edges: gpd.GeoDataFrame):
-    # Classify runways vs. taxiways
-    #   a) If 'service' indicates 'runway' or 'taxiway'
-    #   b) Otherwise, fall back to 'ref' patterns (slash in 'ref' -> runway, else taxiway)
+def buffer_features(gdf: gpd.GeoDataFrame):
+    """
+    Buffers runway/taxiway geometries if width data is available.
+    """
+    if 'width' in gdf.columns and not gdf['width'].isna().all():
+        gdf_m = gdf.to_crs(epsg=3857)
+        gdf_m['geometry'] = gdf_m.apply(
+            lambda x: x.geometry.buffer(float(x.width) / 2, cap_style=3)
+            if not pd.isna(x.width) else x.geometry,
+            axis=1
+        )
+        return gdf_m.to_crs(epsg=4326)
+    return gdf
+
+def generate_static_features(edges: gpd.GeoDataFrame):
+    """
+    Splits edges into runways/taxiways, buffers them,
+    and returns the center coordinates and processed feature groups.
+    Also, tooltips are added to display the "ref" and "name".
+    """
     if 'service' in edges.columns and (
         'runway' in edges['service'].unique() or 'taxiway' in edges['service'].unique()
     ):
         runways = edges[edges['service'] == 'runway'].copy()
         taxiways = edges[edges['service'] == 'taxiway'].copy()
     else:
-        # Fallback: treat any 'ref' containing '/' as a runway
         edges['ref'] = edges['ref'].fillna('')
         runways = edges[edges['ref'].str.contains('/')].copy()
         taxiways = edges[~edges['ref'].str.contains('/')].copy()
 
-    # Buffer path geometries if width is defined as an attribute (runways often have it, taxiways sometimes do)
-    def buffer_features(gdf: gpd.GeoDataFrame):
-        if 'width' in gdf.columns and not gdf['width'].isna().all():
-            # Project to a meter-based coordinate system
-            gdf_m = gdf.to_crs(epsg=3857)
-            # Buffer by half the width
-            gdf_m['geometry'] = gdf_m.apply(
-                lambda x: x.geometry.buffer(float(x.width) / 2, cap_style=3) if not pd.isna(x.width) else x.geometry,
-                axis=1
-            )
-            # Convert back to WGS84
-            return gdf_m.to_crs(epsg=4326)
-        else:
-            return gdf
-
     runways = buffer_features(runways)
     taxiways = buffer_features(taxiways)
 
-    # 5. Determine a suitable map center
     if not runways.empty:
         center_lat = runways.geometry.centroid.y.mean()
         center_lon = runways.geometry.centroid.x.mean()
@@ -66,85 +93,52 @@ def generate_map(edges: gpd.GeoDataFrame):
         center_lat = taxiways.geometry.centroid.y.mean()
         center_lon = taxiways.geometry.centroid.x.mean()
     else:
-        # Fallback: approximate center of KBOS
-        print("WE FELL BACK TO HARDCODED VALUES, CHECK THE CODE...")
-        # NOT GREAT
-        center_lat, center_lon = 42.364, -71.005
-    
-    features = [runways, taxiways]
+        center_lat, center_lon = 41.7868, -87.7522  # Approx Chicago Midway
+    return center_lat, center_lon, [runways, taxiways]
 
-    return center_lat, center_lon, features
-
-def build_interface(center_lat: float, center_lon: float, features: List[gpd.GeoDataFrame]):
-    runways = features[0]
-    taxiways = features[1]
-
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles="cartodbpositron")
-
-    # Add runways layer (in red)
-    if not runways.empty:
-        folium.GeoJson(
-            runways.__geo_interface__,
-            name="Runways",
-            style_function=lambda feature: {
-                'color': 'red',
-                'weight': 3,
-                'fillColor': 'red',
-                'fillOpacity': 0.5,
-            },
-            tooltip=folium.GeoJsonTooltip(fields=['ref', 'width'], aliases=['Ref', 'Width'])
-        ).add_to(m)
-
-    # Add taxiways layer (in blue)
-    if not taxiways.empty:
-        folium.GeoJson(
-            taxiways.__geo_interface__,
-            name="Taxiways",
-            style_function=lambda feature: {
-                'color': 'blue',
-                'weight': 2,
-                'fillColor': 'blue',
-                'fillOpacity': 0.5,
-            },
-            tooltip=folium.GeoJsonTooltip(fields=['ref', 'width'], aliases=['Ref', 'Width'])
-        ).add_to(m)
-
-    folium.LayerControl().add_to(m)
-    return m
-
+# -------------------------------------------------------------------
+# Flight path and compliance logic
+# -------------------------------------------------------------------
 def predict_position(lat, lon, bearing, speed, t):
     """
-    Predict the future position given the current location, bearing, speed, and time.
+    Given a starting lat, lon, bearing (degrees), and speed (m/s),
+    compute the destination after t seconds.
     """
     d = speed * t
     origin = (lat, lon)
     destination = distance(meters=d).destination(origin, bearing)
     return destination.latitude, destination.longitude
 
-def evaluate_compliance(instructions: List[Dict], plane: str,
-                        current_lat, current_lon, predicted_lat, predicted_lon,
-                        speed, features, simulation_time: float) -> str:
+def evaluate_compliance(
+    instructions: List[Dict],
+    plane: str,
+    current_lat: float,
+    current_lon: float,
+    predicted_lat: float,
+    predicted_lon: float,
+    speed: float,
+    static_features: List[gpd.GeoDataFrame],
+    simulation_time: float
+) -> Dict[str, str]:
     """
-    Evaluate compliance with the most recent instruction for the given plane whose timestamp
-    is <= simulation_time. For the instruction, check if the predicted path intersects
-    the feature (runway or taxiway) with the matching 'ref'. Then compare the command
-    with the aircraft's state.
+    Evaluates flight path compliance.
+    Filters instructions by mapping the flight name to the ADS-B identifier and ensuring the instruction's time is reached.
     """
-    # Filter instructions for the given plane and time
-    relevant_instr = [instr for instr in instructions if instr["plane"] == plane and instr["time"] <= simulation_time]
+    # Filter instructions using the mapped flight identifier and the adjusted simulation time
+    relevant_instr = [
+        instr for instr in instructions
+        if map_flight_identifier(instr["plane"]) == plane and instr["time"] <= simulation_time
+    ]
     if not relevant_instr:
-        return "No active instruction for compliance evaluation."
-
-    # Use the instruction with the latest time stamp
+        return {"message": "No active instruction for compliance evaluation.", "ref": ""}
+    
     current_instr = max(relevant_instr, key=lambda x: x["time"])
     instr_ref = current_instr["reference"]
-    command = current_instr["command"]
+    command = current_instr["instr"]
 
-    # Build the projected path as a LineString
     line = LineString([(current_lon, current_lat), (predicted_lon, predicted_lat)])
-    # Try to find the feature with matching 'ref'
     found_feature = None
-    for feature_group in features:
+    for feature_group in static_features:
         for idx, row in feature_group.iterrows():
             ref_val = str(row.get("ref", "")).strip()
             if ref_val == instr_ref:
@@ -154,136 +148,416 @@ def evaluate_compliance(instructions: List[Dict], plane: str,
             break
 
     if found_feature is None:
-        return f"Instruction {current_instr} has no matching feature on the map."
+        return {"message": f"No matching feature found for reference {instr_ref}.", "ref": instr_ref}
 
     intersects = line.intersects(found_feature)
-    # Set some thresholds (these values are illustrative)
-    landing_max_speed = 25.0      # m/s allowed for landing clearance
-    crossing_min_speed = 5.0      # m/s minimum speed expected when cleared to cross
-    hold_speed_threshold = 1.0    # m/s: near zero expected for hold-short
+    landing_max_speed = 25.0
+    crossing_min_speed = 5.0
+    hold_speed_threshold = 1.0
 
-    compliance = ""
-    if command == "CLEAR_TO_LAND":
-        # Expectation: aircraft should intersect a runway and its speed should be moderate.
+    if command == "CLEARED_TO_LAND":
         if intersects:
             if speed <= landing_max_speed:
-                compliance = f"In compliance: CLEARED TO LAND on {instr_ref} at safe speed."
+                return {"message": f"In compliance: CLEARED TO LAND on {instr_ref} at safe speed.", "ref": instr_ref}
             else:
-                compliance = f"Non-compliant: Approaching runway {instr_ref} too fast for landing clearance."
+                return {"message": f"Non-compliant: Approaching runway {instr_ref} too fast.", "ref": instr_ref}
         else:
-            compliance = f"Non-compliant: Predicted path does not intersect runway {instr_ref} despite CLEAR_TO_LAND."
+            return {"message": f"Non-compliant: Predicted path does not intersect runway {instr_ref}.", "ref": instr_ref}
     elif command == "CLEAR_TO_CROSS":
-        # Expectation: aircraft should be moving (above crossing_min_speed) while crossing a taxiway.
         if intersects:
             if speed >= crossing_min_speed:
-                compliance = f"In compliance: CLEARED TO CROSS {instr_ref} while moving."
+                return {"message": f"In compliance: CLEARED TO CROSS {instr_ref} while moving.", "ref": instr_ref}
             else:
-                compliance = f"Non-compliant: Aircraft is not moving while cleared to cross {instr_ref}."
+                return {"message": f"Non-compliant: Aircraft is not moving while cleared to cross {instr_ref}.", "ref": instr_ref}
         else:
-            compliance = f"Non-compliant: Predicted path does not intersect taxiway {instr_ref} despite CLEAR_TO_CROSS."
+            return {"message": f"Non-compliant: Predicted path does not intersect taxiway {instr_ref}.", "ref": instr_ref}
     elif command == "HOLD_SHORT":
-        # Expectation: aircraft should not intrude into the feature (or be nearly stationary if already at the hold position).
         if intersects:
             if speed <= hold_speed_threshold:
-                compliance = f"In compliance: HOLD_SHORT at {instr_ref} (aircraft stationary)."
+                return {"message": f"In compliance: HOLD_SHORT at {instr_ref} (aircraft stationary).", "ref": instr_ref}
             else:
-                compliance = f"Non-compliant: Aircraft is moving into {instr_ref} despite HOLD_SHORT."
+                return {"message": f"Non-compliant: Aircraft is moving into {instr_ref} despite HOLD_SHORT.", "ref": instr_ref}
         else:
-            compliance = f"In compliance: No incursion of {instr_ref} as required by HOLD_SHORT."
+            return {"message": f"In compliance: No incursion of {instr_ref} as required by HOLD_SHORT.", "ref": instr_ref}
     else:
-        compliance = "Unknown command."
+        return {"message": f"Unknown command: {command}", "ref": instr_ref}
 
-    # Include the instruction context in the response.
-    return f"Instruction [{current_instr}] evaluation: {compliance}"
+def log_flagged_incursions(
+    plane_histories: Dict[str, pd.DataFrame],
+    instructions: List[Dict],
+    static_features: List[gpd.GeoDataFrame],
+    interval: int = 60
+) -> List[Dict]:
+    """
+    Iterates over each record in each plane’s history.
+    If a non-compliant incursion is detected and hasn't been logged yet for that plane/instruction,
+    logs it and returns a list of flagged incursion events.
+    """
+    events = []
+    for tail, df in plane_histories.items():
+        df = df.sort_values("Timestamp")
+        for _, row in df.iterrows():
+            lat = row["lat"]
+            lon = row["lon"]
+            bearing = row["Direction"]
+            speed = row["Speed"]
+            tstamp = row["Timestamp"]
+            predicted_latitude, predicted_longitude = predict_position(lat, lon, bearing, speed, interval)
+            result = evaluate_compliance(
+                instructions=instructions,
+                plane=tail,
+                current_lat=lat,
+                current_lon=lon,
+                predicted_lat=predicted_latitude,
+                predicted_lon=predicted_longitude,
+                speed=speed,
+                static_features=static_features,
+                simulation_time=float(tstamp) + interval  # Adjusted simulation time
+            )
 
-def main(args=sys.argv):
-    # Simulated instruction set (parsed from ATC audio)
-    instructions = [
-      {
-        "plane": "Southwest 2504",
-        "command": "CLEAR_TO_LAND",
-        "reference": "31C",
-        "time": 9.48
-      },
-      {
-        "plane": "Southwest 2504",
-        "command": "CLEAR_TO_LAND",
-        "reference": "31C",
-        "time": 12
-      },
-      {
-        "plane": "Flexion 560",
-        "command": "CLEAR_TO_CROSS",
-        "reference": "31L",
-        "time": 20.06
-      },
-      {
-        "plane": "Flexion 560",
-        "command": "HOLD_SHORT",
-        "reference": "31C",
-        "time": 20.06
-      },
-      {
-        "plane": "Flagship 560",
-        "command": "HOLD_SHORT",
-        "reference": "H1",
-        "time": 75.54
-      }
-    ]
+            if "Non-compliant" in result["message"]:
+                key = (tail, result["ref"])
+                if key not in flagged_incursions:
+                    flagged_incursions[key] = {
+                        "tail": tail,
+                        "timestamp": tstamp,
+                        "lat": lat,
+                        "lon": lon,
+                        "message": result["message"],
+                        "ref": result["ref"]
+                    }
+                    print(f"[FLAGGED INCURSION] Plane {tail} at timestamp {tstamp}: {result['message']}")
+                    events.append(flagged_incursions[key])
+    return events
 
-    # Assimilate map data
-    gdf_edges = assimilate_routes()
-    center_lat, center_lon, features = generate_map(gdf_edges)
-    m = build_interface(center_lat, center_lon, features)
+def build_flight_path_geojson(
+    plane_histories: Dict[str, pd.DataFrame],
+    instructions: List[Dict],
+    static_features: List[gpd.GeoDataFrame],
+    interval: int = 60
+) -> Dict:
+    """
+    Builds a GeoJSON FeatureCollection for each plane:
+      - A single line for the entire historical path (with plane-specific color)
+      - A 'current' position marker (green)
+      - A 'predicted' position marker (red) with compliance info
+      - A projected line from current to predicted (dashed, in plane color)
+    """
+    features = []
+    for tail, df in plane_histories.items():
+        df = df.sort_values("Timestamp")
+        if df.empty:
+            continue
+        plane_color = get_plane_color(tail)
+        history_coords = [[row["lon"], row["lat"]] for _, row in df.iterrows()]
+        if len(history_coords) > 1:
+            features.append({
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": history_coords},
+                "properties": {
+                    "lineType": "history",
+                    "tail_number": tail,
+                    "planeColor": plane_color
+                }
+            })
+        last_row = df.iloc[-1]
+        lat = last_row["lat"]
+        lon = last_row["lon"]
+        bearing = last_row["Direction"]
+        speed = last_row["Speed"]
+        tstamp = last_row["Timestamp"]
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [lon, lat]},
+            "properties": {
+                "markerType": "current",
+                "tail_number": tail,
+                "timestamp": tstamp,
+                "speed": speed
+            }
+        })
+        pred_lat, pred_lon = predict_position(lat, lon, bearing, speed, interval)
+        compliance_result = evaluate_compliance(
+            instructions=instructions,
+            plane=tail,
+            current_lat=lat,
+            current_lon=lon,
+            predicted_lat=pred_lat,
+            predicted_lon=pred_lon,
+            speed=speed,
+            static_features=static_features,
+            simulation_time=float(tstamp)
+        )
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [pred_lon, pred_lat]},
+            "properties": {
+                "markerType": "predicted",
+                "tail_number": tail,
+                "timestamp": tstamp,
+                "speed": speed,
+                "compliance": compliance_result["message"]
+            }
+        })
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "LineString", "coordinates": [[lon, lat], [pred_lon, pred_lat]]},
+            "properties": {
+                "lineType": "projected",
+                "tail_number": tail,
+                "planeColor": plane_color
+            }
+        })
+    return {"type": "FeatureCollection", "features": features}
 
-    # Placeholder values (Replace with ADS-B or GPS information)
-    # Position in 3D space (x, y, z), Bearing (degrees), Speed (m/s), Vertical Rate (m/s)
-    # Going to have that for some number of aircraft, above will apply for obstacle avoidance.
-    # TCAS allows planes to communicate with each other. We don't have that communication
-    # Therefore, we need some other system to determine who should descend, who should climb
-    current_lat, current_lon = 41.7941664, -87.7642633      # Current position at KMDW
-    bearing = 90                                            # Heading (in degrees)
-    speed = 50                                              # Speed in m/s
-    simulation_time = 75                                    # seconds into simulation
-
-    predicted_lat, predicted_lon = predict_position(current_lat, current_lon, bearing, speed, simulation_time)
+# -------------------------------------------------------------------
+# Folium-based visualization
+# -------------------------------------------------------------------
+def build_interactive_map(
+    center_lat: float,
+    center_lon: float,
+    static_features: List[gpd.GeoDataFrame],
+    flight_geojson: Dict,
+    plane_histories: Dict[str, pd.DataFrame],
+    flagged_events: List[Dict]
+) -> folium.Map:
+    """
+    Constructs an interactive Folium map with:
+      - Runway/taxiway layers (with tooltips for edge names and refs),
+      - Flight path features,
+      - Historical point markers (with timestamp tooltips),
+      - Circle markers for flagged incursion regions,
+      - A live mouse position indicator.
+    """
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=10, tiles="cartodbpositron")
+    MousePosition(
+        position="topright",
+        separator=" | ",
+        prefix="Lat/Long:",
+        lat_formatter="function(num) {return L.Util.formatNum(num, 5);}",
+        lng_formatter="function(num) {return L.Util.formatNum(num, 5);}"
+    ).add_to(m)
     
-    # For simulation, assume this aircraft is "Southwest 2504"
-    current_plane = "Southwest 2504"
-    compliance_msg = evaluate_compliance(instructions, current_plane,
-                                         current_lat, current_lon,
-                                         predicted_lat, predicted_lon,
-                                         speed, features, simulation_time)
+    # Add static features with tooltips showing 'ref' and 'name'
+    runways, taxiways = static_features
+    if not runways.empty:
+        folium.GeoJson(
+            runways.__geo_interface__,
+            name="Runways",
+            style_function=lambda f: {'color': 'red', 'weight': 2, 'fillOpacity': 0.3},
+            tooltip=folium.GeoJsonTooltip(fields=["ref", "name"], aliases=["Ref", "Name"], localize=True)
+        ).add_to(m)
+    if not taxiways.empty:
+        folium.GeoJson(
+            taxiways.__geo_interface__,
+            name="Taxiways",
+            style_function=lambda f: {'color': 'white', 'weight': 2, 'fillOpacity': 0.3},
+            tooltip=folium.GeoJsonTooltip(fields=["ref", "name"], aliases=["Ref", "Name"], localize=True)
+        ).add_to(m)
+    
+    # Add flight path features (markers and lines)
+    for feature in flight_geojson["features"]:
+        geom_type = feature["geometry"]["type"]
+        coords = feature["geometry"]["coordinates"]
+        props = feature["properties"]
+        if geom_type == "Point":
+            lon_pt, lat_pt = coords
+            marker_type = props.get("markerType", "")
+            icon_color = "green" if marker_type == "current" else "red" if marker_type == "predicted" else "blue"
+            tail = props.get("tail_number")
+            speed = props.get("speed")
+            popup_text = f"Tail: {tail} | Speed: {speed} m/s"
+            if props.get("compliance"):
+                popup_text += f"<br>{props.get('compliance')}"
+            folium.Marker(
+                location=[lat_pt, lon_pt],
+                icon=folium.Icon(color="white", icon_color=icon_color, icon="plane"),
+                popup=popup_text
+            ).add_to(m)
+        elif geom_type == "LineString":
+            plane_color = props.get("planeColor", "purple")
+            line_type = props.get("lineType", "")
+            dash = "5, 5" if line_type == "projected" else None
+            folium.PolyLine(
+                locations=[[c[1], c[0]] for c in coords],
+                color=plane_color,
+                weight=3,
+                dash_array=dash
+            ).add_to(m)
+    
+    # Add historical point markers with timestamp tooltips
+    for tail, df in plane_histories.items():
+        for _, row in df.iterrows():
+            folium.CircleMarker(
+                location=[row["lat"], row["lon"]],
+                radius=2,
+                color=get_plane_color(tail),
+                fill=True,
+                fill_opacity=0.7,
+                tooltip=f"Timestamp: {row['Timestamp']}"
+            ).add_to(m)
+    
+    # Add circle markers for flagged incursion events
+    for event in flagged_events:
+        folium.Circle(
+            location=[event["lat"], event["lon"]],
+            radius=50,  # radius in meters; adjust as needed
+            color="yellow",
+            fill=True,
+            fill_color="yellow",
+            fill_opacity=0.35,
+            # Popup text when clicking the circle
+            popup=(
+                f"Flagged incursion for plane {event['tail']} (ref: {event['ref']})<br>"
+                f"First occurred at timestamp {event['timestamp']}<br>"
+                f"{event['message']}"
+            ),
+            # Tooltip text when hovering over the circle
+            tooltip=f"Timestamp: {event['timestamp']}"
+        ).add_to(m)
+    
+    folium.LayerControl().add_to(m)
+    return m
 
-    # Mark current position
-    folium.Marker(
-        [current_lat, current_lon],
-        popup="Current Position",
-        icon=folium.Icon(color="green"),
-        tooltip=f"[Lat: {current_lat}, Long: {current_lon}]"
-    ).add_to(m)
-    print(f"[DEBUG] Marker for current position should be inserted.\n")
+def map_flight_identifier(flight_name: str) -> str:
+    """
+    Maps ATC flight names to their ADS-B tail identifiers.
+    Adjust the mapping as necessary.
+    """
+    mapping = {
+        "Southwest 2504": "SWA2504",
+        "FlexJet 560": "LXJ560"
+    }
+    for key, ident in mapping.items():
+        if key in flight_name:
+            return ident
+    return flight_name  # Fallback if no mapping is found
 
-    # Mark predicted position with incursion and compliance information
-    folium.Marker(
-        [predicted_lat, predicted_lon],
-        popup=f"Predicted Position (t={simulation_time}s).\nCompliance: {compliance_msg}",
-        icon=folium.Icon(color="red"),
-        tooltip=f"[Lat: {predicted_lat}, Long: {predicted_lon}]",
-    ).add_to(m)
-    print(f"[DEBUG] Marker for predicted position should be inserted.\n")
+# -------------------------------------------------------------------
+# Main
+# -------------------------------------------------------------------
+def main():
+    # Sample instruction set for compliance
+    instructions = [
+        {
+            "plane": "Southwest 2504",
+            "instr": "CLEARED_TO_LAND",
+            "reference": "31C",
+            "time": 1740494856.48+5
+        },
+        {
+            "plane": "FlexJet 560",
+            "instr": "TURN_LEFT",
+            "reference": "4L",
+            "time": 1740494867.06+5
+        },
+        {
+            "plane": "FlexJet 560",
+            "instr": "CLEAR_TO_CROSS",
+            "reference": "31L",
+            "time": 1740494867.06+5
+        },
+        {
+            "plane": "FlexJet 560",
+            "instr": "HOLD_SHORT",
+            "reference": "31C",
+            "time": 1740494867.06+5
+        },
+        {
+            "plane": "FlexJet 560",
+            "instr": "HOLD_POSITION",
+            "reference": "",
+            "time": 1740494913.54+5
+        },
+        {
+            "plane": "FlexJet 560",
+            "instr": "HOLD_POSITION",
+            "reference": "",
+            "time": 1740494915.44+5
+        },
+        {
+            "plane": "FlexJet 560",
+            "instr": "HOLD_SHORT",
+            "reference": "Hotel",
+            "time": 1740494919.82+5
+        },
+        {
+            "plane": "FlexJet 560",
+            "instr": "HOLD_SHORT",
+            "reference": "Hotel",
+            "time": 1740494922.54+5
+        },
+        {
+            "plane": "Southwest 2504",
+            "instr": "TURN_LEFT_HEADING",
+            "reference": "220",
+            "time": 1740494932.7+5
+        },
+        {
+            "plane": "FlexJet 560",
+            "instr": "HOLD_POSITION",
+            "reference": "",
+            "time": 1740494939.96+5
+        },
+        {
+            "plane": "FlexJet 560",
+            "instr": "HOLD_POSITION",
+            "reference": "",
+            "time": 1740494941.3+5
+        }
+    ]
+    
+    # 1) Load static airport data
+    gdf_edges = assimilate_routes()
+    center_lat, center_lon, static_feats = generate_static_features(gdf_edges)
+    
+    # 2) Load full ADS-B data for each plane, up to a chosen timestamp
+    tracker = AircraftTracker(folder_path="adsb/csvs")
+    query_ts = 1740500135  # adjust as needed
+    plane_histories = {}
+    for tail, df in tracker.aircraft_data.items():
+        subset = df[(df["Timestamp"] <= query_ts) & (df["Timestamp"] >= 1740494856)]
+        if not subset.empty:
+            plane_histories[tail] = subset
+    
+    # 3) Compute time window based on Southwest flight's arrival at Chicago Midway and last ATC command
+    last_atc_time = max(instr["time"] for instr in instructions)
+    southwest_tail = map_flight_identifier("Southwest 2504")
+    arrival_time = None
+    if southwest_tail in plane_histories:
+        df_sw = plane_histories[southwest_tail].sort_values("Timestamp")
+        # Determine arrival as the first instance within 1 km of airport center
+        for _, row in df_sw.iterrows():
+            if distance((row["lat"], row["lon"]), (center_lat, center_lon)).meters < 1000:
+                arrival_time = row["Timestamp"]
+                break
+    if arrival_time is None and southwest_tail in plane_histories:
+        arrival_time = plane_histories[southwest_tail]["Timestamp"].min()
+    
+    # Define window with a 2-minute (120 sec) buffer before arrival and after last ATC command
+    window_start = arrival_time - 60
+    window_end = last_atc_time + 60
 
-    # Draw projected path polyline
-    folium.PolyLine(
-        locations=[[current_lat, current_lon], [predicted_lat, predicted_lon]],
-        color="yellow",
-        weight=25,
-        opacity=0.8
-    ).add_to(m)
-    print(f"[DEBUG] Path prediction should be drawn.\n")
-
-    m.save("kmdw-pathpreds.html")
-    print(compliance_msg)
+    # Filter each flight's history to only include records within the computed time window
+    for tail, df in plane_histories.items():
+        plane_histories[tail] = df[(df["Timestamp"] >= window_start) & (df["Timestamp"] <= window_end)]
+    
+    # 4) Log flagged incursions (only first occurrence per plane/instruction)
+    flagged_events = log_flagged_incursions(plane_histories, instructions, static_feats, interval=60)
+    
+    # 5) Build flight path GeoJSON (including compliance info)
+    flight_geojson = build_flight_path_geojson(
+        plane_histories=plane_histories,
+        instructions=instructions,
+        static_features=static_feats,
+        interval=60  # Predict 60 seconds ahead
+    )
+    
+    # 6) Construct and save the interactive Folium map
+    folium_map = build_interactive_map(center_lat, center_lon, static_feats, flight_geojson, plane_histories, flagged_events)
+    folium_map.save("kmdw_interactive_flight_map.html")
+    print("Interactive map saved to kmdw_interactive_flight_map.html")
+    print("\nNote on flagged incursions: Repeated flagging over long periods may occur if compliance is evaluated on every record. We now only record the first flagged event per plane/instruction.")
 
 if __name__ == "__main__":
     main()
