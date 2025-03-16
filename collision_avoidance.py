@@ -7,7 +7,7 @@ import numpy as np
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 
-# URL for ADS-B data (example endpoint)
+# URL for ADS-B data
 URL = "https://api.adsb.lol/v2/lat/42.3555/lon/-71.0565/dist/50"
 
 def haversine(lat1, lon1, lat2, lon2):
@@ -62,11 +62,7 @@ def get_planes_data():
                 velocity = float(velocity)
             except ValueError:
                 continue
-            # Convert altitude to feet if below 15,240 (assume meters), else skip unrealistic values.
-            if altitude < 15240:
-                altitude = altitude * 3.28084
-            else:
-                altitude = None
+
             track = plane.get('track', 0)
             plane_data = {
                 'icao24': plane.get('hex', 'N/A'),
@@ -365,13 +361,6 @@ def realtime_simulation():
         plt.close()
 
 if __name__ == "__main__":
-    print("Starting enhanced aircraft collision avoidance visualization...")
+    print("Starting aircraft collision avoidance visualization...")
     print("Press Ctrl+C to exit.")
-    try:
-        # Check if cartopy is available, otherwise recommend installation
-        import cartopy
-        realtime_simulation()
-    except ImportError:
-        print("\nERROR: This enhanced visualization requires additional packages.")
-        print("Please install the required dependencies with:")
-        print("pip install matplotlib numpy cartopy requests")
+    realtime_simulation()
