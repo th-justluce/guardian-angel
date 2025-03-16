@@ -25,7 +25,6 @@
 │   ├── controller.py
 │   ├── features.py
 │   ├── flights.py
-│   ├── kmdw_interactive_flight_map.html
 │   └── visualize.py
 ├── presentation
 │   ├── plane_missile_collision.gif
