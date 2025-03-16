@@ -6,7 +6,7 @@ from litellm import completion
 from transformers import pipeline
 
 CACHE_FOLDER = 'cache'
-OPEN_AI_WHISPER = "openai/whisper-large-v3"
+OPEN_AI_WHISPER = "openai/whisper-small"
 
 load_dotenv()
 os.makedirs(CACHE_FOLDER, exist_ok=True)
@@ -195,29 +195,68 @@ formatted_prompt = prompt_template.format(
 
 # 2) Cache the OpenAI response.
 openai_cache_file = os.path.splitext(audio_file)[0] + "_openai_response.json"
-openai_cache_file = os.path.join(CACHE_FOLDER, openai_cache_file)
 
+openai_cache_file = os.path.join(CACHE_FOLDER, openai_cache_file)
 if os.path.exists(openai_cache_file):
     with open(openai_cache_file, "r") as f:
         print(f"Loading cached OpenAI response from {openai_cache_file}")
         openai_response = json.load(f)
 else:
-    print("Calling OpenAI completion with the formatted prompt...")
-    openai_response_obj = completion(
-      model="o3-mini",
-      response_format={"type": "json_object"},
-      messages=[
-        {"role": "system", "content": "You are an expert ATC transcript analysis and expert in the field of aviation."},
-        {"role": "user", "content": formatted_prompt}
-      ]
+    from llama_cpp import Llama
+
+    llm = Llama(
+        model_path="Meta-Llama-3-8B-Instruct.Q2_K.gguf",
+        n_gpu_layers=-1,
+        num_gpu=-1,
+        verbose=True,
+        seed=1337,
+        n_ctx=4096
     )
-    # Extract and parse the OpenAI response.
-    openai_response = json.loads(openai_response_obj.choices[0].message.content)
+
+    output = llm(
+        formatted_prompt,
+        max_tokens=None, # Generate up to 32 tokens, set to None to generate up to the end of the context window
+        stop=["Q:", "]"], # Stop generating just before the model would generate a new question
+        echo=True # Echo the prompt back in the output
+    ) # Generate a completion, can also call create_completion
     
+    raw_text = output['choices'][0]['text']
+
+    # Step 1: Remove the echoed prompt.
+    # Find the start of the answer marker ("A:") and take the substring from there.
+    answer_start = raw_text.find("A:")
+    if answer_start != -1:
+        answer_text = raw_text[answer_start:]
+    else:
+        answer_text = raw_text
+
+    # Step 2: Extract the JSON block.
+    # We assume the JSON is between triple backticks.
+    parts = answer_text.split("```")
+    if len(parts) >= 3:
+        json_text = parts[1].strip()  # The JSON block is in the first code block.
+    else:
+        json_text = answer_text.strip()
+
+    # Step 3: Fix the missing closing bracket.
+    if not json_text.rstrip().endswith("]"):
+        json_text += "\n]"
+
+    print("Fixed JSON text:")
+    print(json_text)
+
+    # Step 4: Parse the JSON to verify it works.
+    try:
+        parsed_json = json.loads(json_text)
+        print("\nParsed JSON:")
+        print(parsed_json)
+    except json.JSONDecodeError as e:
+        print("Error parsing JSON:", e)
+
     # Cache the response.
     with open(openai_cache_file, "w") as f:
-        json.dump(openai_response, f)
+        json.dump(parsed_json, f)
     print(f"OpenAI response cached to {openai_cache_file}")
 
-print("OpenAI response:")
-print(json.dumps(openai_response, indent=2))
+print("LLM response:")
+print(json.dumps(parsed_json, indent=2))
