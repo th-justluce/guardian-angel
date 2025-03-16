@@ -2,14 +2,38 @@ from adsb.adsb_manager import AircraftTracker
 
 from control.features import assimilate_routes, generate_static_features
 from control.flights import Flights
-from control.visualize import build_interactive_map
+from control.visualize import build_animated_map
 
 from geopy.distance import distance
 
-import json
+def log_violations(incursions: dict):
+    VIOLATIONS = []
+    for _, value in incursions.items():
+        VIOLATIONS.append(value)
+    
+    print(f"\nNature of incursions (set length: {len(incursions)}):")
+    print("----------------------------------------------------------------------------------------------------------------")
+    val: dict
+    for val in VIOLATIONS:
+        reason = val.get('message')
+        toi = val.get('timestamp')
+        speed = val.get('speed')
+        heading = val.get('heading')
+        forecast = val.get('interval')
+        recommendation = val.get('advisory')
+        pred_outcome = val.get('prediction')
+
+        print(f">> {reason}\n::::::::::::::::: [ timestamp: {toi} • lat/long location: ({val.get('lat'), val.get('lon')})")
+        print(f"::::::::::::::::: [ speed: {speed}ms/s • heading: {heading} degrees • path forecast: {forecast} seconds")
+        print(f"::::::::::::::::: |--------------------------------------------------------------------------------------")
+        print(f"::::::::::::::::: |     RECOMMENDATION : {recommendation}")
+        print(f"::::::::::::::::: |     IF NOT FOLLOWED: {pred_outcome}")
+        print(f"::::::::::::::::: |--------------------------------------------------------------------------------------")
+        print("------------------^---------------------------------------------------------------------------------------------")
+    print("\nInteractive map saved to kmdw_interactive_flight_map.html")
 
 def main():
-    # Sample ATC instructions
+    # ATC tower instructions: Audio processed through Whisper and transcribed into JSON object for ADS-B referencing
     instructions = [
         {"plane": "Southwest 2504", "instr": "CLEARED_TO_LAND", "reference": "31C", "time": 1740494856.48},
         {"plane": "FlexJet 560", "instr": "TURN_LEFT", "reference": "04L/22R", "time": 1740494867.06},
@@ -30,16 +54,23 @@ def main():
     
     # 2) Load ADS-B data for each plane
     tracker = AircraftTracker(folder_path="adsb/csvs")
-    query_ts = 1740500135  # Adjust timestamp as needed
     plane_histories = {}
+    query_ts = 0
     for tail, df in tracker.aircraft_data.items():
-        subset = df[(df["Timestamp"] <= query_ts) & (df["Timestamp"] >= 1740494856)]
+        if max(df["Timestamp"]) > query_ts:
+            query_ts = max(df["Timestamp"])
+        subset = df[df["Timestamp"] <= query_ts]
         if not subset.empty:
             plane_histories[tail] = subset
-
-    # 3) Determine the time window for evaluation based on arrival and ATC instruction times
-    last_atc_time = max(instr["time"] for instr in instructions)
-
+    
+    # Initialize a time buffer between the first and last ATC instructions
+    forced_start = 1740494856 - 15
+    forced_end = 1740494920 + 15
+    
+    for tail, df in plane_histories.items():
+        plane_histories[tail] = df[(df["Timestamp"] >= forced_start)]
+    for tail, df in plane_histories.items():
+            plane_histories[tail] = df[(df["Timestamp"] <= forced_end)]
     flights = Flights()
 
     southwest_tail = flights.map_flight_identifier("Southwest 2504")
@@ -51,35 +82,26 @@ def main():
                 break
         if arrival_time is None:
             arrival_time = plane_histories[southwest_tail]["Timestamp"].min()
-
-    window_start = arrival_time - 60
-    window_end   = last_atc_time + 60
-    for tail, df in plane_histories.items():
-        plane_histories[tail] = df[(df["Timestamp"] >= window_start) & (df["Timestamp"] <= window_end)]
     
-    # 4) Log flagged incursions (only the first occurrence per plane/ref)
-    flagged_events = flights.log_flagged_incursions(plane_histories, instructions, static_feats, interval=20)
+    # 3) Log flagged incursions (only the first occurrence per plane/ref)
+    flagged_events = flights.log_flagged_incursions(plane_histories, instructions, static_feats, interval=5)
     
-    # 5) Build flight path GeoJSON (including optional compliance checks)
-    flight_geojson = flights.build_flight_path_geojson(plane_histories, instructions, static_feats, interval=20)
+    # 4) Build flight path GeoJSON (including optional compliance checks)
+    flight_geojson = flights.build_flight_path_geojson(plane_histories, instructions, static_feats, interval=5)
     
-    # 6) Create and save the interactive map
-    folium_map = build_interactive_map(center_lat, center_lon, static_feats, flight_geojson, plane_histories, flagged_events)
+    # 5) Create and save the interactive map
+    folium_map = build_animated_map(
+        center_lat, center_lon,
+        static_feats,
+        flight_geojson,
+        plane_histories,
+        flagged_events,
+        animation_speed=50.0  # e.g. double speed
+    )
     folium_map.save("kmdw_interactive_flight_map.html")
 
     FLAGGED_INCURSIONS = flights._getFlaggedIncursions()
-    VIOLATIONS = []
-    for _, value in FLAGGED_INCURSIONS.items():
-        VIOLATIONS.append(value)
-    
-    print(f"\nNature of incursions (set length: {len(FLAGGED_INCURSIONS)}):")
-    print("-----------------")
-    val: dict
-    for val in VIOLATIONS:
-        reason = val.get('message')
-        print(f">> {reason}\n::::::::::::::::: [timestamp: {val.get('timestamp')} • lat/long location: ({val.get('lat'), val.get('lon')})]")
-        print("-----------------")
-    print("\nInteractive map saved to kmdw_interactive_flight_map.html")
+    log_violations(FLAGGED_INCURSIONS)
 
 if __name__ == "__main__":
     main()
