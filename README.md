@@ -36,9 +36,9 @@
 ```
 
 ### Feature Rundown
-collision_avoidance.py takes in ADS-B data and handles the collision avoidance calculations for all aircraft nearby.
+`collision_avoidance.py` takes in ADS-B data and handles the collision avoidance calculations for all aircraft nearby.
 
-Within the presentation folder, we simply have a lovely missle animation to highlight how little time a fighter pilot may have to react.
+Within the `presentation` folder, we simply have a lovely missle animation to highlight how little time a fighter pilot may have to react.
 We cut it from the presentation for time.
 
 Within the control folder:
