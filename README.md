@@ -1,6 +1,4 @@
 # README
-## Overview
-(Will populate from slides at some point)
 
 ## Project Structure
 ```bash
