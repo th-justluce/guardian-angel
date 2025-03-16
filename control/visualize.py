@@ -351,7 +351,7 @@ def build_custom_js(m: folium.Map, flights, violations, animation_interval=20):
                     // If there is a prediction line for this flight, update its lat/lng 
                     // to go from the current position to the predicted position.
                     if (flightPredictions[tail]) {{
-                        var dtAhead = 10.0;
+                        var dtAhead = 30.0;
                         var predictedPos = projectPosition(pos[0], pos[1], heading, speed, dtAhead);
                         flightPredictions[tail].setLatLngs([pos, predictedPos]);
                     }}

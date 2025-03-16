@@ -21,7 +21,7 @@ class Flights:
         FLAGGED_INCURSIONS = {}
         self.FLAGGED_INCURSIONS = FLAGGED_INCURSIONS
 
-        self.interval = 5
+        self.interval = 30
     
     def _getFlaggedIncursions(self):
         return self.FLAGGED_INCURSIONS
@@ -89,6 +89,32 @@ class Flights:
                 "advisory": "MAINTAIN POSITION",
                 "prediction": "Potential unknown hazard."
             }
+        
+    def project_position(self, lat: float, lon: float, heading_deg: float, speed: float, dt_sec: float):
+        """
+        Predicts a future position given current lat/lon, heading, speed, and time delta (seconds).
+        """
+        R = 6371000  # Earth radius in meters
+        distance_ahead = speed * dt_sec
+        import math
+        heading_rad = math.radians(heading_deg)
+        lat_rad = math.radians(lat)
+        lon_rad = math.radians(lon)
+
+        new_lat_rad = math.asin(
+            math.sin(lat_rad) * math.cos(distance_ahead / R) +
+            math.cos(lat_rad) * math.sin(distance_ahead / R) * math.cos(heading_rad)
+        )
+
+        new_lon_rad = lon_rad + math.atan2(
+            math.sin(heading_rad) * math.sin(distance_ahead / R) * math.cos(lat_rad),
+            math.cos(distance_ahead / R) - math.sin(lat_rad) * math.sin(new_lat_rad)
+        )
+
+        new_lat = math.degrees(new_lat_rad)
+        new_lon = math.degrees(new_lon_rad)
+
+        return new_lat, new_lon
 
     def evaluate_compliance(self,
                             plane: str,
@@ -115,7 +141,7 @@ class Flights:
         logger.debug(f"evaluate_compliance called for plane={plane} at time={current_time}")
 
         # Build the real flight line from the last fix to the current fix
-        flight_line = LineString([(prev_lon, prev_lat), (current_lon, current_lat)])
+        flight_line = LineString([(current_lon, current_lat), (prev_lon, prev_lat)])
 
         # 1) Check if plane has a HOLD_POSITION or HOLD_SHORT instruction in effect
         relevant_instr = [
@@ -144,7 +170,7 @@ class Flights:
                 )
                 if not cleared and hold_ref:
                     feature_geom = self.get_feature_geometry(hold_ref, static_features)
-                    feature_geom = feature_geom.buffer(20)
+                    feature_geom = feature_geom.buffer(40)
                     if feature_geom is not None and flight_line.intersects(feature_geom):
                         logger.debug(f"HOLD violation detected for plane={plane} on {hold_ref}")
                         violation_msg = (
@@ -186,27 +212,44 @@ class Flights:
         events = []
         for tail, df in plane_histories.items():
             logger.debug(f"Processing plane={tail} with {len(df)} records.")
-            # df = df.sort_values("Timestamp")
             
             prev_row = None
+            pred_lat, pred_lon = None, None
+
             for _, row in df.iterrows():
                 if prev_row is None:
+                    # For the first row, initialize predicted positions with actual values
+                    pred_lat, pred_lon = row["lat"], row["lon"]
                     prev_row = row
                     continue
 
-                # Evaluate real flight path from prev → current
+                # Compute predicted positions based on previous prediction
+                time_ahead_intervals = [5, 10, 15, 20, 25, 30]  # Seconds into the future
+                current_lat, current_lon = row["lat"], row["lon"]
+                
+                for dt_sec in time_ahead_intervals:
+                    pred_lat, pred_lon = self.project_position(
+                        lat=current_lat,
+                        lon=current_lon,
+                        heading_deg=row["Direction"],
+                        speed=row["Speed"],
+                        dt_sec=dt_sec
+                    )
+
+                # Evaluate compliance using predicted positions
                 result = self.evaluate_compliance(
                     plane=tail,
-                    prev_lat=prev_row["lat"],
-                    prev_lon=prev_row["lon"],
-                    current_lat=row["lat"],
-                    current_lon=row["lon"],
+                    prev_lat=current_lat,
+                    prev_lon=current_lon,
+                    current_lat=pred_lat,
+                    current_lon=pred_lon,
                     speed=row["Speed"],
                     bearing=row["Direction"],
                     static_features=static_features,
-                    current_time=row["Timestamp"],
+                    current_time=row["Timestamp"] + dt_sec,
                     instructions=instructions
                 )
+
                 if "Non-compliant" in result["message"]:
                     key = (tail, result["ref"])
                     if key not in self.FLAGGED_INCURSIONS:
@@ -223,10 +266,9 @@ class Flights:
                             "prediction": result["prediction"],
                             "advisory": result["advisory"]
                         }
-                        logger.debug(
-                            f"[FLAGGED] {tail} at {result['timestamp']}: {result['message']}"
-                        )
+                        print(f"[EARLY WARNING] {tail}: {result['message']} at t+{dt_sec}s")
                         events.append(self.FLAGGED_INCURSIONS[key])
+
                 prev_row = row  # Update prev_row for next iteration
         logger.debug("log_flagged_incursions completed.")
         return events
@@ -298,10 +340,7 @@ class Flights:
                 # Basic example: "predict" 60s ahead
                 # We keep this for display, though your real violation check
                 # is now in the "previous → current" approach in log_flagged_incursions
-                from geopy.distance import distance
-                distance_ahead = speed * interval
-                destination = distance(meters=distance_ahead).destination((lat, lon), bearing)
-                pred_lat, pred_lon = destination.latitude, destination.longitude
+                pred_lat, pred_lon = self.project_position(lat, lon, bearing, speed, interval)
 
                 # Evaluate compliance purely for a visual note (optional)
                 compliance_result = {

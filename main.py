@@ -64,8 +64,8 @@ def main():
     
     for tail, df in plane_histories.items():
         plane_histories[tail] = df[(df["Timestamp"] >= forced_start)]
-    for tail, df in plane_histories.items():
-        plane_histories[tail] = df[(df["Timestamp"] <= forced_end)]
+    # for tail, df in plane_histories.items():
+    #     plane_histories[tail] = df[(df["Timestamp"] <= forced_end)]
     flights = Flights()
 
     southwest_tail = flights.map_flight_identifier("Southwest 2504")
@@ -79,10 +79,10 @@ def main():
             arrival_time = plane_histories[southwest_tail]["Timestamp"].min()
     
     # 3) Log flagged incursions (only the first occurrence per plane/ref)
-    flagged_events = flights.log_flagged_incursions(plane_histories, instructions, static_feats, interval=10)
+    flagged_events = flights.log_flagged_incursions(plane_histories, instructions, static_feats, interval=30)
     
     # 4) Build flight path GeoJSON (including optional compliance checks)
-    flight_geojson = flights.build_flight_path_geojson(plane_histories, instructions, static_feats, interval=10)
+    flight_geojson = flights.build_flight_path_geojson(plane_histories, instructions, static_feats, interval=30)
     
     # 5) Create and save the interactive map
     folium_map = build_animated_map(
