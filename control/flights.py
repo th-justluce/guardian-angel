@@ -228,7 +228,6 @@ class Flights:
                         )
                         events.append(self.FLAGGED_INCURSIONS[key])
                 prev_row = row  # Update prev_row for next iteration
-        print(events)
         logger.debug("log_flagged_incursions completed.")
         return events
 
@@ -311,7 +310,7 @@ class Flights:
 
                 features.append({
                     "type": "Feature",
-                    "geometry": {"type": "Point", "coordinates": [pred_lon, pred_lat]},
+                    "geometry": {"type": "Point", "predicted-coords": [pred_lon, pred_lat]},
                     "properties": {
                         "markerType": "predicted",
                         "tail_number": tail,
@@ -322,7 +321,7 @@ class Flights:
                 })
                 features.append({
                     "type": "Feature",
-                    "geometry": {"type": "LineString", "coordinates": [[lon, lat], [pred_lon, pred_lat]]},
+                    "geometry": {"type": "LineString", "actual-to-pred-coords": [[lon, lat], [pred_lon, pred_lat]]},
                     "properties": {
                         "lineType": "projected",
                         "tail_number": tail,

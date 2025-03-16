@@ -61,6 +61,34 @@ def build_custom_js(m: folium.Map, flights, violations, animation_interval=20):
         }};
         controlPanel.addTo(mapObject);
 
+        function projectPosition(lat, lon, headingDeg, speed, dtSec) {{
+            // Earth radius in meters
+            var R = 6371000;
+            // distance to travel
+            var distance = speed * dtSec;  
+            // convert everything to radians
+            var heading = headingDeg * Math.PI / 180.0;
+            var latRad = lat * Math.PI / 180.0;
+            var lonRad = lon * Math.PI / 180.0;
+            
+            // Haversine-like formula
+            var newLat = Math.asin(
+                Math.sin(latRad) * Math.cos(distance / R) +
+                Math.cos(latRad) * Math.sin(distance / R) * Math.cos(heading)
+            );
+            var newLon = lonRad + Math.atan2(
+                Math.sin(heading) * Math.sin(distance / R) * Math.cos(latRad),
+                Math.cos(distance / R) - Math.sin(latRad) * Math.sin(newLat)
+            );
+            
+            // convert back to degrees
+            return [
+                newLat * 180.0 / Math.PI,
+                newLon * 180.0 / Math.PI
+            ];
+        }}
+
+
         var flights = {flights};
         var violations = {violations};
         
@@ -105,6 +133,10 @@ def build_custom_js(m: folium.Map, flights, violations, animation_interval=20):
         var flightMarkers = {{}};
         var flightPaths = {{}};
         var flightTrails = {{}};
+
+        // NEW OR MODIFIED CODE:
+        // We'll store a separate dashed polyline for predicted paths.
+        var flightPredictions = {{}};
         
         // Use a plane icon for better visualization with increased size
         function createPlaneIcon(color, heading) {{
@@ -153,6 +185,20 @@ def build_custom_js(m: folium.Map, flights, violations, animation_interval=20):
                 
                 // Initialize empty trail
                 flightTrails[tail] = [];
+
+                // NEW OR MODIFIED CODE:
+                // If the flight dictionary has predictedLat/predictedLon, create a dashed polyline for it.
+                if (!flightPredictions[tail]) {{
+                    var predictedLine = L.polyline([], {{
+                        color: color,
+                        dashArray: '5,5',  // make it dashed
+                        weight: 3,
+                        opacity: 0.7,
+                        smoothFactor: 1
+                    }});
+                    flightPredictions[tail] = predictedLine;
+                    pathsLayer.addLayer(predictedLine);
+                }}
             }}
         }});
 
@@ -253,11 +299,12 @@ def build_custom_js(m: folium.Map, flights, violations, animation_interval=20):
                     var point = flight.points[lastPointIndex];
                     var nextPoint = flight.points[lastPointIndex + 1];
                     
-                    var pos, heading;
+                    var pos, heading, speed;
                     if (nextPoint && nextPoint.timestamp <= time) {{
                         // Exact point match
                         pos = [point.lat, point.lon];
                         heading = point.heading || 0;
+                        speed = point.speed || 0;
                     }} else if (nextPoint) {{
                         // Interpolate between points for smoother motion
                         var ratio = (time - point.timestamp) / (nextPoint.timestamp - point.timestamp);
@@ -274,6 +321,9 @@ def build_custom_js(m: folium.Map, flights, violations, animation_interval=20):
                         if (headingDiff > 180) headingDiff -= 360;
                         if (headingDiff < -180) headingDiff += 360;
                         heading = (point.heading || 0) + headingDiff * ratio;
+                        
+                        speedDiff = (nextPoint.speed || 0) - (point.speed || 0);
+                        speed = (point.speed || 0) + speedDiff * ratio;
                     }} else {{
                         // Just use the last point
                         pos = [point.lat, point.lon];
@@ -295,6 +345,15 @@ def build_custom_js(m: folium.Map, flights, violations, animation_interval=20):
                         
                         // Update path - use the efficient setLatLngs method
                         flightPaths[tail].setLatLngs(flightTrails[tail]);
+                    }}
+
+                    // NEW OR MODIFIED CODE:
+                    // If there is a prediction line for this flight, update its lat/lng 
+                    // to go from the current position to the predicted position.
+                    if (flightPredictions[tail]) {{
+                        var dtAhead = 10.0;
+                        var predictedPos = projectPosition(pos[0], pos[1], heading, speed, dtAhead);
+                        flightPredictions[tail].setLatLngs([pos, predictedPos]);
                     }}
                 }}
             }});
@@ -456,7 +515,7 @@ def build_animated_map(center_lat: float, center_lon: float,
     and visual display of flight paths and runway incursions.
     """
 
-    # Create the base Folium map with a better basemap
+    # Create the base Folium map
     m = folium.Map(
         location=[center_lat, center_lon], 
         zoom_start=14, 
@@ -473,7 +532,7 @@ def build_animated_map(center_lat: float, center_lon: float,
         lng_formatter="function(num) {return L.Util.formatNum(num, 5);}"
     ).add_to(m)
 
-    # Add static features: runways & taxiways with improved styling
+    # Add static features: runways & taxiways
     runways, taxiways = static_features
     if not runways.empty:
         folium.GeoJson(
@@ -516,21 +575,34 @@ def build_animated_map(center_lat: float, center_lon: float,
     for tail, df in plane_histories.items():
         df_sorted = df.sort_values("Timestamp")
         points_list = []
+        
         for _, row in df_sorted.iterrows():
+            lat = row["lat"]
+            lon = row["lon"]
+            speed = row.get("Speed", 0)
+            bearing = row.get("Direction", 0)
+            timestamp = row["Timestamp"]
+            # from geopy.distance import distance
+            # distance_ahead = speed * 5.0
+            # destination = distance(meters=distance_ahead).destination((lat, lon), bearing)
+            # pred_lat, pred_lon = destination.latitude, destination.longitude
             points_list.append({
-                "lat": row["lat"],
-                "lon": row["lon"],
-                "speed": row.get("Speed", 0),
-                "heading": row.get("Direction", 0),
-                "timestamp": row["Timestamp"]
+                "lat": lat,
+                "lon": lon,
+                "speed": speed,
+                "heading": bearing,
+                "timestamp": timestamp
             })
-        flight_data_js.append({
+        
+        flight_dict = {
             "tail": tail,
             "points": points_list,
-            "color": get_plane_color(tail)
-        })
+            "color": get_plane_color(tail),
+        }
+        
+        flight_data_js.append(flight_dict)
 
-    # Create violations dictionary with improved formatting
+    # Create violations dictionary
     violations_by_time = {}
     for ev in flagged_events:
         ts = ev["timestamp"]
